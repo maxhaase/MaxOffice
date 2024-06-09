@@ -1,0 +1,35 @@
+version: '3.7'
+
+services:
+  wordpress:
+    image: wordpress:latest
+    container_name: wordpress_lung.se
+    environment:
+      WORDPRESS_DB_HOST: db_lung.se
+      WORDPRESS_DB_USER: admin
+      WORDPRESS_DB_PASSWORD: ChangeMe000!
+      WORDPRESS_DB_NAME: wordpress_lung.se
+    volumes:
+      - ./wordpress_lung.se:/var/www/html
+    ports:
+      - "80:80"
+    networks:
+      - wpnet_lung.se
+
+  db:
+    image: mysql:5.7
+    container_name: db_lung.se
+    environment:
+      MYSQL_DATABASE: wordpress_lung.se
+      MYSQL_USER: admin
+      MYSQL_PASSWORD: ChangeMe000!
+      MYSQL_ROOT_PASSWORD: ChangeMe000!
+    volumes:
+      - db_data_lung.se:/var/lib/mysql
+    networks:
+      - wpnet_lung.se
+
+networks:
+  wpnet_lung.se:
+volumes:
+  db_data_lung.se:

@@ -1,95 +1,95 @@
-version: '3.9'
+version: '3.8'
 
 services:
   db_shared:
     image: mysql:5.7
-    container_name: db_shared
+    restart: always
     environment:
+      MYSQL_ROOT_PASSWORD: ChangeMe000!
       MYSQL_DATABASE: wordpress
       MYSQL_USER: admin
       MYSQL_PASSWORD: ChangeMe000!
-      MYSQL_ROOT_PASSWORD: ChangeMe000!
     volumes:
-      - db_data_shared:/var/lib/mysql
-    networks:
-      - wpnet
+      - db_data:/var/lib/mysql
 
-  wordpress_lung.se:
+  wordpress1:
     image: wordpress:latest
-    container_name: wordpress_lung.se
+    restart: always
     environment:
-      WORDPRESS_DB_HOST: db_shared
+      WORDPRESS_DB_HOST: db_shared:3306
       WORDPRESS_DB_USER: admin
       WORDPRESS_DB_PASSWORD: ChangeMe000!
-      WORDPRESS_DB_NAME: wordpress_lung.se
-    volumes:
-      - ./wordpress_lung.se:/var/www/html
-    networks:
-      - wpnet
+      WORDPRESS_DB_NAME: wordpress
+    depends_on:
+      - db_shared
+    ports:
+      - "80:80"
 
-  wordpress_exsol.es:
+  wordpress2:
     image: wordpress:latest
-    container_name: wordpress_exsol.es
+    restart: always
     environment:
-      WORDPRESS_DB_HOST: db_shared
+      WORDPRESS_DB_HOST: db_shared:3306
       WORDPRESS_DB_USER: admin
       WORDPRESS_DB_PASSWORD: ChangeMe000!
-      WORDPRESS_DB_NAME: wordpress_exsol.es
-    volumes:
-      - ./wordpress_exsol.es:/var/www/html
-    networks:
-      - wpnet
+      WORDPRESS_DB_NAME: wordpress
+    depends_on:
+      - db_shared
+    ports:
+      - "80:80"
 
   mailserver:
     image: tvial/docker-mailserver:latest
     hostname: mail
     domainname: mail.lung.se
-    container_name: mailserver
+    restart: always
     env_file: vars.env
     ports:
-      - "2525:25"
-      - "143:143"
-      - "587:587"
-      - "993:993"
+      - "25:25"
       - "465:465"
+      - "587:587"
       - "110:110"
       - "995:995"
-      - "4190:4190"
+      - "143:143"
+      - "993:993"
     volumes:
-      - ./maildata:/var/mail
-      - ./mailstate:/var/mail-state
-      - ./config:/tmp/docker-mailserver/
+      - maildata:/var/mail
+      - mailstate:/var/mail-state
+      - ./config/:/tmp/docker-mailserver/
     environment:
-      - ENABLE_SPAMASSASSIN=1
-      - ENABLE_CLAMAV=1
-      - ENABLE_FAIL2BAN=1
-      - ENABLE_POSTGREY=1
-      - ONE_DIR=1
-      - DMS_DEBUG=0
-    cap_add:
-      - NET_ADMIN
-      - SYS_PTRACE
-    restart: unless-stopped
-    networks:
-      - mailnet
+      ENABLE_SPAMASSASSIN: 1
+      ENABLE_CLAMAV: 1
+      ENABLE_FAIL2BAN: 1
+      ENABLE_POSTGREY: 0
 
   webmail:
-    image: roundcube/roundcubemail:latest
-    container_name: webmail
+    image: roundcube/roundcubemail:
+    restart: always
     environment:
-      ROUNDCUBEMAIL_DEFAULT_HOST: mail.lung.se
-      ROUNDCUBEMAIL_SMTP_SERVER: tls://mail.lung.se
-      ROUNDCUBEMAIL_SMTP_PORT: 587
-      ROUNDCUBEMAIL_DEFAULT_PORT: 143
-    volumes:
-      - ./webmail:/var/www/html
+      ROUNDCUBEMAIL_DEFAULT_HOST: imaps://mail.mail.lung.se
+      ROUNDCUBEMAIL_SMTP_SERVER: tls://mail.mail.lung.se
     ports:
-      - "8080:80"
-    networks:
-      - mailnet
+      - "80:80"
+    depends_on:
+      - mailserver
 
-networks:
-  wpnet:
-  mailnet:
+  postfixadmin:
+    image: hardware/postfixadmin
+    restart: always
+    environment:
+      - POSTFIXADMIN_DB_TYPE=mysqli
+      - POSTFIXADMIN_DB_USER=admin
+      - POSTFIXADMIN_DB_PASS=ChangeMe000!
+      - POSTFIXADMIN_DB_HOST=db_shared
+      - POSTFIXADMIN_DB_NAME=wordpress
+      - POSTFIXADMIN_ADMIN_USER=admin
+      - POSTFIXADMIN_ADMIN_PASS=ChangeMe000!
+    depends_on:
+      - db_shared
+    ports:
+      - ":80"
+
 volumes:
-  db_data_shared:
+  db_data:
+  maildata:
+  mailstate:

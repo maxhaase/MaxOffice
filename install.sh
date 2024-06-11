@@ -6,62 +6,62 @@ source vars.env
 # Function to clean up sources.list
 clean_sources() {
   echo "Cleaning up sources.list to remove duplicates..."
-  grep -v "^#" /etc/apt/sources.list | sort | uniq > /etc/apt/sources.list.new
-  mv /etc/apt/sources.list.new /etc/apt/sources.list
+  sudo sh -c 'grep -v "^#" /etc/apt/sources.list | sort | uniq > /etc/apt/sources.list.new'
+  sudo mv /etc/apt/sources.list.new /etc/apt/sources.list
   echo "Cleaned up sources.list."
 }
 
 # Function to install required packages
 install_packages() {
   echo "Updating package lists and installing necessary packages..."
-  apt-get update -y
-  apt-get install -y apache2 apt-transport-https ca-certificates curl software-properties-common certbot python3-certbot-apache mailutils
+  sudo apt-get update -y
+  sudo apt-get install -y apache2 apt-transport-https ca-certificates curl software-properties-common certbot python3-certbot-apache mailutils
   echo "Packages installed."
 }
 
 # Function to install Docker
 install_docker() {
   echo "Installing Docker..."
-  apt-get install -y containerd.io docker-ce docker-ce-cli
+  sudo apt-get install -y containerd.io docker-ce docker-ce-cli
   echo "Docker installed."
 }
 
 # Function to install Docker Compose
 install_docker_compose() {
   echo "Installing Docker Compose..."
-  curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-  chmod +x /usr/local/bin/docker-compose
+  sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+  sudo chmod +x /usr/local/bin/docker-compose
   echo "Docker Compose installed."
 }
 
 # Function to start Docker service
 start_docker_service() {
   echo "Enabling and starting Docker service..."
-  systemctl enable docker
-  systemctl start docker
+  sudo systemctl enable docker
+  sudo systemctl start docker
   echo "Docker service started."
 }
 
 # Function to add user to Docker group
 add_user_to_docker_group() {
   echo "Adding user to the docker group..."
-  usermod -aG docker $USER
+  sudo usermod -aG docker $USER
   echo "User added to the docker group."
 }
 
 # Function to configure firewall rules
 configure_firewall() {
   echo "Configuring firewall rules..."
-  ufw allow 25
-  ufw allow 465
-  ufw allow 587
-  ufw allow 110
-  ufw allow 995
-  ufw allow 143
-  ufw allow 993
-  ufw allow 4190
-  ufw allow 80
-  ufw allow 443
+  sudo ufw allow 25
+  sudo ufw allow 465
+  sudo ufw allow 587
+  sudo ufw allow 110
+  sudo ufw allow 995
+  sudo ufw allow 143
+  sudo ufw allow 993
+  sudo ufw allow 4190
+  sudo ufw allow 80
+  sudo ufw allow 443
   echo "Firewall rules configured."
 }
 
@@ -171,7 +171,7 @@ EOF
 # Function to deploy Docker containers
 deploy_docker_containers() {
   echo "Deploying Docker containers..."
-  docker-compose up -d
+  sudo docker-compose up -d
   echo "Docker containers deployed."
 }
 
@@ -179,7 +179,7 @@ deploy_docker_containers() {
 setup_letsencrypt() {
   domain=$1
   echo "Setting up Let's Encrypt for $domain..."
-  certbot certonly --standalone --non-interactive --agree-tos -m admin@$domain -d $domain
+  sudo certbot certonly --standalone --non-interactive --agree-tos -m admin@$domain -d $domain
   echo "Let's Encrypt setup completed for $domain."
 }
 
@@ -188,7 +188,7 @@ configure_apache() {
   domain=$1
   port=$2
   echo "Configuring Apache virtual host for $domain..."
-  cat <<EOF > /etc/apache2/sites-available/$domain.conf
+  sudo sh -c "cat <<EOF > /etc/apache2/sites-available/$domain.conf
 <VirtualHost *:80>
     ServerName $domain
     Redirect permanent / https://$domain/
@@ -205,9 +205,9 @@ configure_apache() {
     ProxyPass / http://localhost:$port/
     ProxyPassReverse / http://localhost:$port/
 </VirtualHost>
-EOF
-  a2ensite $domain.conf
-  systemctl reload apache2
+EOF"
+  sudo a2ensite $domain.conf
+  sudo systemctl reload apache2
   echo "Apache virtual host configured for $domain."
 }
 

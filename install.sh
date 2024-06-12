@@ -1,77 +1,72 @@
 #!/bin/bash
 
-# Load variables from vars.env
-set -a
-source ./vars.env
-set +a
+# Load environment variables
+echo "Loading environment variables from vars.env..."
+source vars.env
+echo "Loaded environment variables."
 
-# Function to clean up sources.list
-clean_sources() {
-  echo "Cleaning up sources.list to remove duplicates..."
-  sudo sh -c 'grep -v "^#" /etc/apt/sources.list | sort | uniq > /etc/apt/sources.list.new'
-  sudo mv /etc/apt/sources.list.new /etc/apt/sources.list
-  echo "Cleaned up sources.list."
-}
+# Update package lists and install necessary packages
+echo "Updating package lists and installing necessary packages..."
+sudo apt-get update -y
+sudo apt-get install -y apache2 apt-transport-https ca-certificates certbot curl mailutils python3-certbot-apache software-properties-common
+echo "Packages installed."
 
-# Function to install required packages
-install_packages() {
-  echo "Updating package lists and installing necessary packages..."
+# Add Docker's official GPG key
+echo "Adding Docker's official GPG key..."
+if [ ! -f /usr/share/keyrings/docker-archive-keyring.gpg ]; then
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  echo "Docker's official GPG key added."
+else
+  echo "Docker's official GPG key already exists. Skipping."
+fi
+
+# Set up the Docker repository
+echo "Setting up the Docker repository..."
+if ! grep -q "^deb \[arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg\] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" /etc/apt/sources.list /etc/apt/sources.list.d/*; then
+  echo "deb \[arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg\] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
   sudo apt-get update -y
-  sudo apt-get install -y apache2 apt-transport-https ca-certificates curl software-properties-common certbot python3-certbot-apache mailutils
-  echo "Packages installed."
-}
+  echo "Docker repository set up."
+else
+  echo "Docker repository already set up. Skipping."
+fi
 
-# Function to install Docker
-install_docker() {
-  echo "Installing Docker..."
-  sudo apt-get install -y containerd.io docker-ce docker-ce-cli
-  echo "Docker installed."
-}
+# Install Docker
+echo "Installing Docker..."
+sudo apt-get install -y containerd.io docker-ce docker-ce-cli
+echo "Docker installed."
 
-# Function to install Docker Compose
-install_docker_compose() {
-  echo "Installing Docker Compose..."
-  sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-  sudo chmod +x /usr/local/bin/docker-compose
-  echo "Docker Compose installed."
-}
+# Install Docker Compose
+echo "Installing Docker Compose..."
+DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep -Po '"tag_name": "\K.*?(?=")')
+sudo curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+echo "Docker Compose installed."
 
-# Function to start Docker service
-start_docker_service() {
-  echo "Enabling and starting Docker service..."
-  sudo systemctl enable docker
-  sudo systemctl start docker
-  echo "Docker service started."
-}
+# Enable and start Docker service
+echo "Enabling and starting Docker service..."
+sudo systemctl enable docker
+sudo systemctl start docker
+echo "Docker service started."
 
-# Function to add user to Docker group
-add_user_to_docker_group() {
-  echo "Adding user to the docker group..."
-  sudo usermod -aG docker $USER
-  echo "User added to the docker group."
-}
+# Add user to the docker group
+echo "Adding user to the docker group..."
+sudo usermod -aG docker $USER
+echo "User added to the docker group."
 
-# Function to configure firewall rules
-configure_firewall() {
-  echo "Configuring firewall rules..."
-  sudo ufw allow 25
-  sudo ufw allow 465
-  sudo ufw allow 587
-  sudo ufw allow 110
-  sudo ufw allow 995
-  sudo ufw allow 143
-  sudo ufw allow 993
-  sudo ufw allow 4190
-  sudo ufw allow 80
-  sudo ufw allow 443
-  echo "Firewall rules configured."
-}
+# Configure firewall rules
+echo "Configuring firewall rules..."
+ports=(${SMTP_PORT} ${SMTPS_PORT} ${SMTP_ALT_PORT} ${POP3_PORT} ${POP3S_PORT} ${IMAP_PORT} ${IMAPS_PORT} 80 443 22 ${DOMAIN1_PORT} ${DOMAIN2_PORT} ${WEBMAIL_PORT})
+for port in "${ports[@]}"; do
+  sudo ufw allow $port
+done
+sudo ufw enable
+sudo ufw status
+echo "Firewall rules configured."
 
-# Function to create docker-compose.yml
-create_docker_compose() {
-  echo "Creating docker-compose.yml..."
-  cat <<EOF > docker-compose.yml
-version: '3.8'
+# Create docker-compose.yml
+echo "Creating docker-compose.yml..."
+sudo tee docker-compose.yml > /dev/null <<EOF
+version: '3.7'
 
 services:
   db_shared:
@@ -93,10 +88,10 @@ services:
       WORDPRESS_DB_USER: ${WORDPRESS_DB_USER}
       WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
       WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
-    depends_on:
-      - db_shared
     ports:
       - "${DOMAIN1_PORT}:80"
+    depends_on:
+      - db_shared
 
   wordpress2:
     image: wordpress:${WORDPRESS_VERSION}
@@ -106,17 +101,16 @@ services:
       WORDPRESS_DB_USER: ${WORDPRESS_DB_USER}
       WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
       WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
-    depends_on:
-      - db_shared
     ports:
       - "${DOMAIN2_PORT}:80"
+    depends_on:
+      - db_shared
 
   mailserver:
     image: tvial/docker-mailserver:${MAILSERVER_VERSION}
     hostname: mail
     domainname: ${MAIL_DOMAIN}
-    restart: always
-    env_file: vars.env
+    container_name: mail
     ports:
       - "${SMTP_PORT}:25"
       - "${SMTPS_PORT}:465"
@@ -128,113 +122,192 @@ services:
     volumes:
       - maildata:/var/mail
       - mailstate:/var/mail-state
+      - maillogs:/var/log/mail
       - ./config/:/tmp/docker-mailserver/
     environment:
-      ENABLE_SPAMASSASSIN: 1
-      ENABLE_CLAMAV: 1
-      ENABLE_FAIL2BAN: 1
-      ENABLE_POSTGREY: 0
+      - ENABLE_SPAMASSASSIN=1
+      - ENABLE_CLAMAV=1
+      - ENABLE_FAIL2BAN=1
+      - ONE_DIR=1
+      - DMS_DEBUG=0
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    depends_on:
+      - db_shared
 
   webmail:
     image: roundcube/roundcubemail:${ROUNDCUBEMAIL_VERSION}
-    restart: always
-    environment:
-      ROUNDCUBEMAIL_DEFAULT_HOST: imaps://${MAIL_DOMAIN}
-      ROUNDCUBEMAIL_SMTP_SERVER: tls://${MAIL_DOMAIN}
     ports:
       - "${WEBMAIL_PORT}:80"
     depends_on:
       - mailserver
+    environment:
+      - ROUNDCUBEMAIL_DEFAULT_HOST=mail.${MAIL_DOMAIN}
+      - ROUNDCUBEMAIL_SMTP_SERVER=mail.${MAIL_DOMAIN}
+      - ROUNDCUBEMAIL_DES_KEY=${ROUNDCUBEMAIL_DES_KEY}
+      - ROUNDCUBEMAIL_DB_TYPE=mysql
+      - ROUNDCUBEMAIL_DB_HOST=db_shared
+      - ROUNDCUBEMAIL_DB_USER=${MYSQL_USER}
+      - ROUNDCUBEMAIL_DB_PASSWORD=${MYSQL_PASSWORD}
+      - ROUNDCUBEMAIL_DB_NAME=${MYSQL_DATABASE}
 
   postfixadmin:
     image: hardware/postfixadmin
-    restart: always
-    environment:
-      POSTFIXADMIN_DB_TYPE: mysqli
-      POSTFIXADMIN_DB_USER: ${MYSQL_USER}
-      POSTFIXADMIN_DB_PASS: ${MYSQL_PASSWORD}
-      POSTFIXADMIN_DB_HOST: db_shared
-      POSTFIXADMIN_DB_NAME: ${MYSQL_DATABASE}
-      POSTFIXADMIN_ADMIN_USER: ${POSTFIXADMIN_ADMIN_USER}
-      POSTFIXADMIN_ADMIN_PASS: ${POSTFIXADMIN_ADMIN_PASS}
+    ports:
+      - "8080:80"
     depends_on:
       - db_shared
-    ports:
-      - "8081:80"
+    environment:
+      - DBPASS=${MYSQL_PASSWORD}
+      - DBUSER=${MYSQL_USER}
+      - DBDATABASE=${MYSQL_DATABASE}
+      - DBHOST=db_shared
+      - POSTFIXADMIN_SETUP_PASSWORD=${POSTFIXADMIN_ADMIN_PASS}
+      - POSTFIXADMIN_SETUP_EMAIL=${POSTFIXADMIN_EMAIL}
 
 volumes:
   db_data:
   maildata:
   mailstate:
+  maillogs:
 EOF
-  echo "docker-compose.yml created."
+echo "docker-compose.yml created."
+
+
+# Create mail.env file for Docker Mailserver
+echo "Creating mail.env..."
+sudo tee mail.env > /dev/null <<EOF
+POSTMASTER_ADDRESS=postmaster@${MAIL_DOMAIN}
+EOF
+echo "mail.env created."
+
+# Check port availability before deploying Docker containers
+check_port() {
+  if lsof -Pi :$1 -sTCP:LISTEN -t >/dev/null ; then
+    echo "Port $1 is already in use. Exiting."
+    exit 1
+  fi
 }
 
-# Function to deploy Docker containers
-deploy_docker_containers() {
-  echo "Deploying Docker containers..."
-  sudo docker-compose up -d
-  echo "Docker containers deployed."
-}
+check_port ${DOMAIN1_PORT}
+check_port ${DOMAIN2_PORT}
+check_port ${SMTP_PORT}
+check_port ${SMTPS_PORT}
+check_port ${SMTP_ALT_PORT}
+check_port ${POP3_PORT}
+check_port ${POP3S_PORT}
+check_port ${IMAP_PORT}
+check_port ${IMAPS_PORT}
+check_port ${WEBMAIL_PORT}
 
-# Function to set up Let's Encrypt
-setup_letsencrypt() {
-  domain=$1
-  echo "Setting up Let's Encrypt for $domain..."
-  sudo certbot certonly --standalone --non-interactive --agree-tos -m admin@$domain -d $domain
-  echo "Let's Encrypt setup completed for $domain."
-}
+echo "Deploying Docker containers..."
+sudo /usr/local/bin/docker-compose up -d
+echo "Docker containers deployed."
 
-# Function to configure Apache
-configure_apache() {
-  domain=$1
-  port=$2
-  echo "Configuring Apache virtual host for $domain..."
-  sudo sh -c "cat <<EOF > /etc/apache2/sites-available/$domain.conf
+echo "Waiting for MySQL to be ready..."
+while ! docker exec -it $(docker ps -q -f name=db_shared) mysqladmin --user=root --password=${MYSQL_ROOT_PASSWORD} ping --silent &> /dev/null ; do
+  echo "Waiting for database connection..."
+  sleep 2
+done
+echo "Database connection verified."
+
+echo "Setting up Let's Encrypt for ${DOMAIN1}, ${DOMAIN2}, ${MAIL_DOMAIN}, and ${WEBMAIL_DOMAIN}..."
+sudo certbot certonly --standalone -d ${DOMAIN1} -d ${DOMAIN2} -d ${MAIL_DOMAIN} -d ${WEBMAIL_DOMAIN} --non-interactive --agree-tos --email ${POSTFIXADMIN_EMAIL} --expand
+echo "Let's Encrypt setup completed."
+
+echo "Configuring Apache virtual host for ${DOMAIN1}..."
+sudo tee /etc/apache2/sites-available/${DOMAIN1}.conf > /dev/null <<EOF
 <VirtualHost *:80>
-    ServerName $domain
-    Redirect permanent / https://$domain/
+    ServerName ${DOMAIN1}
+    Redirect permanent / https://${DOMAIN1}/
 </VirtualHost>
-
 <VirtualHost *:443>
-    ServerName $domain
-
+    ServerName ${DOMAIN1}
+    DocumentRoot /var/www/html
     SSLEngine on
-    SSLCertificateFile /etc/letsencrypt/live/$domain/fullchain.pem
-    SSLCertificateKeyFile /etc/letsencrypt/live/$domain/privkey.pem
-
-    ProxyPreserveHost On
-    ProxyPass / http://localhost:$port/
-    ProxyPassReverse / http://localhost:$port/
+    SSLCertificateFile /etc/letsencrypt/live/${DOMAIN1}/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/${DOMAIN1}/privkey.pem
+    <Directory /var/www/html>
+        AllowOverride All
+    </Directory>
 </VirtualHost>
-EOF"
-  sudo a2ensite $domain.conf
-  sudo systemctl reload apache2
-  echo "Apache virtual host configured for $domain."
-}
+EOF
+sudo a2ensite ${DOMAIN1}.conf
+sudo systemctl reload apache2
+echo "Apache virtual host configured for ${DOMAIN1}."
 
-# Main installation
-clean_sources
-install_packages
-install_docker
-install_docker_compose
-start_docker_service
-add_user_to_docker_group
-configure_firewall
-create_docker_compose
-deploy_docker_containers
+echo "Configuring Apache virtual host for ${DOMAIN2}..."
+sudo tee /etc/apache2/sites-available/${DOMAIN2}.conf > /dev/null <<EOF
+<VirtualHost *:80>
+    ServerName ${DOMAIN2}
+    Redirect permanent / https://${DOMAIN2}/
+</VirtualHost>
+<VirtualHost *:443>
+    ServerName ${DOMAIN2}
+    DocumentRoot /var/www/html
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/${DOMAIN2}/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/${DOMAIN2}/privkey.pem
+    <Directory /var/www/html>
+        AllowOverride All
+    </Directory>
+</VirtualHost>
+EOF
+sudo a2ensite ${DOMAIN2}.conf
+sudo systemctl reload apache2
+echo "Apache virtual host configured for ${DOMAIN2}."
 
-# Setting up Let's Encrypt and Apache configurations
-setup_letsencrypt $DOMAIN1
-configure_apache $DOMAIN1 $DOMAIN1_PORT
-setup_letsencrypt $DOMAIN2
-configure_apache $DOMAIN2 $DOMAIN2_PORT
-setup_letsencrypt $MAIL_DOMAIN
-configure_apache $MAIL_DOMAIN $WEBMAIL_PORT
+echo "Configuring Apache virtual host for ${MAIL_DOMAIN}..."
+sudo tee /etc/apache2/sites-available/${MAIL_DOMAIN}.conf > /dev/null <<EOF
+<VirtualHost *:80>
+    ServerName ${MAIL_DOMAIN}
+    Redirect permanent / https://${MAIL_DOMAIN}/
+</VirtualHost>
+<VirtualHost *:443>
+    ServerName ${MAIL_DOMAIN}
+    DocumentRoot /var/www/html
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/${MAIL_DOMAIN}/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/${MAIL_DOMAIN}/privkey.pem
+    <Directory /var/www/html>
+        AllowOverride All
+    </Directory>
+</VirtualHost>
+EOF
+sudo a2ensite ${MAIL_DOMAIN}.conf
+sudo systemctl reload apache2
+echo "Apache virtual host configured for ${MAIL_DOMAIN}."
 
-echo "Setup completed. Access your services at:"
-echo "https://$DOMAIN1 for DOMAIN1"
-echo "https://$DOMAIN2 for DOMAIN2"
-echo "https://$MAIL_DOMAIN for mail services"
-echo "https://$WEBMAIL_DOMAIN for webmail"
+echo "Configuring Apache virtual host for ${WEBMAIL_DOMAIN}..."
+sudo tee /etc/apache2/sites-available/${WEBMAIL_DOMAIN}.conf > /dev/null <<EOF
+<VirtualHost *:80>
+    ServerName ${WEBMAIL_DOMAIN}
+    Redirect permanent / https://${WEBMAIL_DOMAIN}/
+</VirtualHost>
+<VirtualHost *:443>
+    ServerName ${WEBMAIL_DOMAIN}
+    DocumentRoot /var/www/html
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/${WEBMAIL_DOMAIN}/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/${WEBMAIL_DOMAIN}/privkey.pem
+    <Directory /var/www/html>
+        AllowOverride All
+    </Directory>
+</VirtualHost>
+EOF
+sudo a2ensite ${WEBMAIL_DOMAIN}.conf
+sudo systemctl reload apache2
+echo "Apache virtual host configured for ${WEBMAIL_DOMAIN}."
+
+echo "You can access your applications at the following URLs:"
+echo "WordPress 1: https://${DOMAIN1}"
+echo "WordPress 2: https://${DOMAIN2}"
+echo "Mailserver: https://${MAIL_DOMAIN}"
+echo "Webmail: https://${WEBMAIL_DOMAIN}"
+
+# Check the status of Docker containers
+echo "Checking the status of Docker containers..."
+sudo /usr/local/bin/docker-compose ps
+echo "Installation and setup complete."
 

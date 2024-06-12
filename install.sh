@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Load variables from vars.env
-set -o allexport
-source vars.env
-set -o allexport-
+set -a
+source ./vars.env
+set +a
 
 # Function to clean up sources.list
 clean_sources() {

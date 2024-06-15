@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# Load environment variables from vars.env
+# Load variables from vars.env
 source vars.env
 
 # Function to install dependencies
 install_dependencies() {
   echo "Installing dependencies..."
   sudo apt-get update
-  sudo apt-get install -y ca-certificates curl software-properties-common ufw apt-transport-https certbot jq
+  sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw jq
 }
 
 # Function to install Docker
@@ -16,8 +16,7 @@ install_docker() {
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
   sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
   sudo apt-get update
-  sudo apt-get install -y containerd.io docker-ce docker-ce-cli
-  sudo usermod -aG docker $USER
+  sudo apt-get install -y docker-ce docker-ce-cli containerd.io
 }
 
 # Function to install kubectl
@@ -32,19 +31,20 @@ install_kubectl() {
 install_minikube() {
   echo "Installing Minikube..."
   curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-  sudo install minikube-linux-amd64 /usr/local/bin/minikube
+  chmod +x minikube-linux-amd64
+  sudo mv minikube-linux-amd64 /usr/local/bin/minikube
 }
 
 # Function to start Minikube
 start_minikube() {
   echo "Starting Minikube..."
-  minikube start --driver=docker --force
+  sudo minikube start --driver=docker
 }
 
 # Function to configure UFW firewall
 configure_firewall() {
   echo "Configuring UFW firewall..."
-  sudo ufw allow ${SSH_PORT}
+  sudo ufw allow ${SSH_PORT}/tcp
   sudo ufw allow ${K8S_API_SERVER_PORT}/tcp
   sudo ufw allow ${HTTPS_PORT}/tcp
   sudo ufw allow ${HTTP_PORT}/tcp
@@ -54,25 +54,15 @@ configure_firewall() {
 # Function to clean up Kubernetes resources
 cleanup_kubernetes() {
   echo "Cleaning up Kubernetes resources..."
-  kubectl delete namespace ${KUBE_NAMESPACE} || true
-  kubectl delete namespace ingress-nginx || true
-  kubectl delete namespace cert-manager || true
-  minikube stop
-  minikube delete
-  sudo rm -rf ~/.kube ~/.minikube
-  sudo rm -rf /usr/local/bin/localkube /usr/local/bin/minikube
-  sudo systemctl stop '*kubelet*.mount' || true
-  sudo systemctl disable kubelet || true
-  sudo rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/minikube /var/lib/localkube /var/log/localkube /var/log/minikube
-  sudo ip link delete cni0 || true
-  sudo ip link delete flannel.1 || true
-  sudo rm -rf /var/lib/cni/
+  kubectl delete namespace ${KUBE_NAMESPACE} --ignore-not-found
+  kubectl delete namespace ingress-nginx --ignore-not-found
+  kubectl delete namespace cert-manager --ignore-not-found
 }
 
 # Function to uninstall Cert-Manager
 uninstall_cert_manager() {
   echo "Uninstalling Cert-Manager..."
-  kubectl delete -f https://github.com/jetstack/cert-manager/releases/download/v1.10.1/cert-manager.yaml || true
+  kubectl delete -f https://github.com/jetstack/cert-manager/releases/download/v1.3.1/cert-manager.yaml --ignore-not-found
 }
 
 # Function to install Nginx Ingress controller
@@ -84,18 +74,18 @@ install_nginx_ingress() {
 # Function to install Cert-Manager
 install_cert_manager() {
   echo "Installing Cert-Manager..."
-  kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v1.10.1/cert-manager.yaml
+  kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v1.3.1/cert-manager.yaml
 }
 
 # Function to wait for Cert-Manager to be ready
 wait_for_cert_manager() {
   echo "Waiting for Cert-Manager to be ready..."
-  kubectl wait --namespace cert-manager --for=condition=ready pod --selector=app.kubernetes.io/instance=cert-manager --timeout=120s
+  kubectl wait --namespace cert-manager --for=condition=ready pod --selector=app.kubernetes.io/instance=cert-manager --timeout=300s
 }
 
-# Function to configure Cert-Manager ClusterIssuer
+# Function to configure Cert-Manager
 configure_cert_manager() {
-  echo "Configuring Cert-Manager ClusterIssuer..."
+  echo "Configuring Cert-Manager..."
   cat <<EOF | kubectl apply -f -
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -117,6 +107,7 @@ EOF
 # Function to deploy MySQL
 deploy_mysql() {
   echo "Deploying MySQL..."
+  
   cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -132,20 +123,6 @@ spec:
 EOF
 
   cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: mysql-service
-  namespace: ${KUBE_NAMESPACE}
-spec:
-  ports:
-    - port: 3306
-      name: mysql
-  selector:
-    app: mysql
-EOF
-
-  cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -155,8 +132,6 @@ spec:
   selector:
     matchLabels:
       app: mysql
-  strategy:
-    type: Recreate
   template:
     metadata:
       labels:
@@ -185,17 +160,32 @@ spec:
         persistentVolumeClaim:
           claimName: mysql-pvc
 EOF
+
+  cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-service
+  namespace: ${KUBE_NAMESPACE}
+spec:
+  ports:
+    - port: 3306
+      targetPort: 3306
+      name: mysql
+  selector:
+    app: mysql
+EOF
 }
 
 # Function to check database connection
 check_database_connection() {
   echo "Checking database connection..."
-  kubectl run mysql-client --rm -i --restart='Never' --namespace ${KUBE_NAMESPACE} --image=mysql:5.7 -- mysql -h mysql-service -u root -p${MYSQL_ROOT_PASSWORD} -e "SHOW DATABASES;"
+  kubectl run mysql-client --rm -i --restart='Never' --namespace ${KUBE_NAMESPACE} --image=mysql:5.7 --command -- mysql -h mysql-service -u${MYSQL_USER} -p${MYSQL_PASSWORD} -e "SHOW DATABASES;"
 }
 
 # Function to deploy WordPress
 deploy_wordpress() {
-  echo "Deploying WordPress for ${DOMAIN1} and ${DOMAIN2}..."
+  echo "Deploying WordPress for ${DOMAIN1}..."
   
   cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
@@ -219,7 +209,7 @@ spec:
         - name: WORDPRESS_DB_HOST
           value: mysql-service
         - name: WORDPRESS_DB_NAME
-          value: ${MYSQL_DATABASE}
+          value: ${WORDPRESS_DB_DOMAIN1}
         - name: WORDPRESS_DB_USER
           value: ${WORDPRESS_DB_USER_DOMAIN1}
         - name: WORDPRESS_DB_PASSWORD
@@ -237,13 +227,15 @@ metadata:
   namespace: ${KUBE_NAMESPACE}
 spec:
   ports:
-    - port: ${DOMAIN1_PORT}
+    - port: 80
       targetPort: 80
       name: wordpress1
   selector:
     app: wordpress1
 EOF
 
+  echo "Deploying WordPress for ${DOMAIN2}..."
+  
   cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
@@ -266,7 +258,7 @@ spec:
         - name: WORDPRESS_DB_HOST
           value: mysql-service
         - name: WORDPRESS_DB_NAME
-          value: ${MYSQL_DATABASE}
+          value: ${WORDPRESS_DB_DOMAIN2}
         - name: WORDPRESS_DB_USER
           value: ${WORDPRESS_DB_USER_DOMAIN2}
         - name: WORDPRESS_DB_PASSWORD
@@ -284,7 +276,7 @@ metadata:
   namespace: ${KUBE_NAMESPACE}
 spec:
   ports:
-    - port: ${DOMAIN2_PORT}
+    - port: 80
       targetPort: 80
       name: wordpress2
   selector:
@@ -324,7 +316,7 @@ spec:
         - name: ROUNDCUBEMAIL_DB_PASSWORD
           value: ${ROUNDCUBEMAIL_DB_PASSWORD}
         ports:
-        - containerPort: ${WEBMAIL_PORT}
+        - containerPort: 80
           name: roundcube
 EOF
 
@@ -336,7 +328,7 @@ metadata:
   namespace: ${KUBE_NAMESPACE}
 spec:
   ports:
-    - port: ${WEBMAIL_PORT}
+    - port: 80
       targetPort: 80
       name: roundcube
   selector:
@@ -348,46 +340,6 @@ EOF
 deploy_mailserver() {
   echo "Deploying Mailserver..."
   
-  cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ${KUBE_PVC_NAME_MAIL}
-  namespace: ${KUBE_NAMESPACE}
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
-EOF
-
-  cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: ${KUBE_SERVICE_NAME_MAILSERVER}
-  namespace: ${KUBE_NAMESPACE}
-spec:
-  ports:
-    - port: ${SMTP_PORT}
-      name: smtp
-    - port: ${SMTPS_PORT}
-      name: smtps
-    - port: ${SMTP_ALT_PORT}
-      name: smtp-alt
-    - port: ${POP3_PORT}
-      name: pop3
-    - port: ${POP3S_PORT}
-      name: pop3s
-    - port: ${IMAP_PORT}
-      name: imap
-    - port: ${IMAPS_PORT}
-      name: imaps
-  selector:
-    app: mailserver
-EOF
-
   cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
@@ -404,7 +356,7 @@ spec:
         app: mailserver
     spec:
       containers:
-      - image: mailserver/mailserver:latest
+      - image: mailserver/docker-mailserver:latest
         name: mailserver
         env:
         - name: MAILSERVER_DB_HOST
@@ -416,27 +368,53 @@ spec:
         - name: MAILSERVER_DB_PASSWORD
           value: ${MAILSERVER_DB_PASSWORD}
         ports:
-        - containerPort: ${SMTP_PORT}
+        - containerPort: 25
           name: smtp
-        - containerPort: ${SMTPS_PORT}
+        - containerPort: 465
           name: smtps
-        - containerPort: ${SMTP_ALT_PORT}
+        - containerPort: 587
           name: smtp-alt
-        - containerPort: ${POP3_PORT}
+        - containerPort: 110
           name: pop3
-        - containerPort: ${POP3S_PORT}
+        - containerPort: 995
           name: pop3s
-        - containerPort: ${IMAP_PORT}
+        - containerPort: 143
           name: imap
-        - containerPort: ${IMAPS_PORT}
+        - containerPort: 993
           name: imaps
-        volumeMounts:
-        - name: mail-persistent-storage
-          mountPath: /var/mail
-      volumes:
-      - name: mail-persistent-storage
-        persistentVolumeClaim:
-          claimName: ${KUBE_PVC_NAME_MAIL}
+EOF
+
+  cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailserver-service
+  namespace: ${KUBE_NAMESPACE}
+spec:
+  ports:
+    - port: 25
+      targetPort: 25
+      name: smtp
+    - port: 465
+      targetPort: 465
+      name: smtps
+    - port: 587
+      targetPort: 587
+      name: smtp-alt
+    - port: 110
+      targetPort: 110
+      name: pop3
+    - port: 995
+      targetPort: 995
+      name: pop3s
+    - port: 143
+      targetPort: 143
+      name: imap
+    - port: 993
+      targetPort: 993
+      name: imaps
+  selector:
+    app: mailserver
 EOF
 }
 
@@ -460,7 +438,7 @@ spec:
         app: postfixadmin
     spec:
       containers:
-      - image: postfixadmin/postfixadmin:latest
+      - image: postfixadmin:latest
         name: postfixadmin
         env:
         - name: POSTFIXADMIN_DB_HOST
@@ -472,7 +450,7 @@ spec:
         - name: POSTFIXADMIN_DB_PASSWORD
           value: ${POSTFIXADMIN_DB_PASSWORD}
         ports:
-        - containerPort: ${ADMIN_GUI_PORT}
+        - containerPort: 80
           name: postfixadmin
 EOF
 
@@ -484,7 +462,7 @@ metadata:
   namespace: ${KUBE_NAMESPACE}
 spec:
   ports:
-    - port: ${ADMIN_GUI_PORT}
+    - port: 80
       targetPort: 80
       name: postfixadmin
   selector:
@@ -504,6 +482,7 @@ metadata:
   namespace: ${KUBE_NAMESPACE}
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rewrite-target: /
 spec:
   rules:
   - host: ${DOMAIN1}
@@ -536,16 +515,6 @@ spec:
             name: roundcube-service
             port:
               number: 80
-  - host: ${MAIL_DOMAIN}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: mailserver-service
-            port:
-              number: 80
   - host: ${ADMIN_DOMAIN}
     http:
       paths:
@@ -561,10 +530,18 @@ spec:
     - ${DOMAIN1}
     - ${DOMAIN2}
     - ${WEBMAIL_DOMAIN}
-    - ${MAIL_DOMAIN}
     - ${ADMIN_DOMAIN}
     secretName: office-tls
 EOF
+}
+
+# Function to backup certificates
+backup_certificates() {
+  echo "Backing up certificates..."
+  kubectl get secret office-tls -n ${KUBE_NAMESPACE} -o json | jq -r '.data["tls.crt"]' | base64 --decode > tls.crt
+  kubectl get secret office-tls -n ${KUBE_NAMESPACE} -o json | jq -r '.data["tls.key"]' | base64 --decode > tls.key
+  tar -cvf certs.tar tls.crt tls.key
+  rm tls.crt tls.key
 }
 
 # Function to verify services
@@ -578,25 +555,16 @@ verify_services() {
   kubectl rollout status deployment/postfixadmin -n ${KUBE_NAMESPACE}
 }
 
-# Function to back up certificates
-backup_certificates() {
-  echo "Backing up certificates..."
-  kubectl get secret -n cert-manager letsencrypt-prod -o json | jq -r '.data["tls.crt"]' | base64 --decode > tls.crt
-  kubectl get secret -n cert-manager letsencrypt-prod -o json | jq -r '.data["tls.key"]' | base64 --decode > tls.key
-  tar -cvf certs.tar tls.crt tls.key
-  rm tls.crt tls.key
-}
-
-# Check if certs.tar exists, if not run the whole script, else restore certificates
-if [ ! -f certs.tar ]; then
+# Main script execution
+main() {
   install_dependencies
   install_docker
   install_kubectl
   install_minikube
+  start_minikube
   configure_firewall
   cleanup_kubernetes
   uninstall_cert_manager
-  start_minikube
   install_nginx_ingress
   install_cert_manager
   wait_for_cert_manager
@@ -608,21 +576,16 @@ if [ ! -f certs.tar ]; then
   deploy_mailserver
   deploy_postfixadmin
   setup_ingress
-  verify_services
   backup_certificates
-else
-  echo "Restoring certificates from certs.tar..."
-  tar -xvf certs.tar
-  kubectl create secret tls letsencrypt-prod --cert=tls.crt --key=tls.key -n cert-manager
-  rm tls.crt tls.key
-  echo "Certificates restored."
-fi
+  verify_services
 
-# Output service URLs
-echo "You can access your applications at the following URLs:"
-echo "WordPress 1: https://${DOMAIN1}"
-echo "WordPress 2: https://${DOMAIN2}"
-echo "Mailserver: https://${MAIL_DOMAIN}"
-echo "Webmail: https://${WEBMAIL_DOMAIN}"
-echo "Admin: https://${ADMIN_DOMAIN}"
+  echo "You can access your applications at the following URLs:"
+  echo "WordPress 1: https://${DOMAIN1}"
+  echo "WordPress 2: https://${DOMAIN2}"
+  echo "Mailserver: https://${MAIL_DOMAIN}"
+  echo "Webmail: https://${WEBMAIL_DOMAIN}"
+  echo "Admin: https://${ADMIN_DOMAIN}"
+}
+
+main
 

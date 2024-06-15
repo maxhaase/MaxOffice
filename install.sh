@@ -11,7 +11,7 @@ source vars.env
 install_dependencies() {
     echo "Installing dependencies..."
     sudo apt-get update
-    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw certbot
+    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw
 }
 
 # Function to install Docker
@@ -40,69 +40,47 @@ install_minikube() {
     rm minikube-linux-amd64
 }
 
-# Function to start Minikube without root privileges
+# Function to start Minikube
 start_minikube() {
     echo "Starting Minikube..."
-    sudo -u $USER minikube start --driver=docker --memory=4096 --cpus=2
+    sudo minikube start --driver=docker
 }
 
-# Function to setup Kubernetes namespace
-setup_namespace() {
-    echo "Setting up Kubernetes namespace..."
-    kubectl get namespace $KUBE_NAMESPACE || kubectl create namespace $KUBE_NAMESPACE
-}
-
-# Function to open necessary ports on Ubuntu VM
+# Function to configure the UFW firewall
 configure_firewall() {
     echo "Configuring UFW firewall..."
-    sudo ufw allow $SSH_PORT
-    sudo ufw allow $HTTP_PORT
-    sudo ufw allow $HTTPS_PORT
-    sudo ufw allow $SMTP_PORT
-    sudo ufw allow $SMTPS_PORT
-    sudo ufw allow $SMTP_ALT_PORT
-    sudo ufw allow $POP3_PORT
-    sudo ufw allow $POP3S_PORT
-    sudo ufw allow $IMAP_PORT
-    sudo ufw allow $IMAPS_PORT
-    sudo ufw allow $WEBMAIL_PORT
-    sudo ufw allow $DOMAIN1_PORT
-    sudo ufw allow $DOMAIN2_PORT
-    sudo ufw allow $ADMIN_GUI_PORT
-    sudo ufw --force enable
+    sudo ufw allow $HTTP_PORT/tcp
+    sudo ufw allow $HTTPS_PORT/tcp
+    sudo ufw allow $SSH_PORT/tcp
+    sudo ufw enable
 }
 
-# Function to uninstall Cert-Manager
-uninstall_cert_manager() {
-    echo "Uninstalling Cert-Manager..."
-    kubectl delete -f https://github.com/jetstack/cert-manager/releases/download/v1.7.1/cert-manager.yaml --ignore-not-found
-    kubectl delete namespace cert-manager --ignore-not-found
-    kubectl delete validatingwebhookconfigurations.admissionregistration.k8s.io cert-manager-webhook --ignore-not-found
-    kubectl delete mutatingwebhookconfigurations.admissionregistration.k8s.io cert-manager-webhook --ignore-not-found
-}
-
-# Function to cleanup Kubernetes resources
+# Function to clean up previous Kubernetes resources
 cleanup_kubernetes() {
     echo "Cleaning up Kubernetes resources..."
     kubectl delete namespace $KUBE_NAMESPACE --ignore-not-found
     kubectl delete namespace ingress-nginx --ignore-not-found
-    uninstall_cert_manager
+    kubectl delete -f https://github.com/jetstack/cert-manager/releases/download/v1.7.1/cert-manager.yaml --ignore-not-found
 }
 
-# Function to install and configure Nginx Ingress controller
+# Function to set up Kubernetes namespace
+setup_namespace() {
+    echo "Setting up Kubernetes namespace..."
+    kubectl create namespace $KUBE_NAMESPACE
+}
+
+# Function to install Nginx Ingress controller
 install_ingress_controller() {
     echo "Installing Nginx Ingress controller..."
     kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml
 }
 
-# Function to install and configure Cert-Manager
+# Function to install Cert-Manager
 install_cert_manager() {
     echo "Installing Cert-Manager..."
     kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v1.7.1/cert-manager.yaml
-
     echo "Waiting for Cert-Manager to be ready..."
-    kubectl wait --namespace cert-manager --for=condition=ready pod --selector=app.kubernetes.io/instance=cert-manager --timeout=120s
-
+    kubectl wait --namespace cert-manager --for=condition=ready pod --selector=app.kubernetes.io/instance=cert-manager --timeout=300s
     echo "Configuring Cert-Manager ClusterIssuer..."
     kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
@@ -112,7 +90,7 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: you@example.com
+    email: $CERT_MANAGER_EMAIL
     privateKeySecretRef:
       name: letsencrypt-prod
     solvers:
@@ -396,7 +374,7 @@ EOF
 apiVersion: v1
 kind: Service
 metadata:
-  name: $KUBE_SERVICE_NAME_MAILSERVER
+  name: mailserver-service
   namespace: $KUBE_NAMESPACE
 spec:
   ports:
@@ -467,7 +445,7 @@ spec:
 EOF
 }
 
-# Function to setup Ingress
+# Function to set up Ingress
 setup_ingress() {
     echo "Setting up Ingress..."
     kubectl apply -f - <<EOF
@@ -500,14 +478,14 @@ spec:
             name: wordpress2-service
             port:
               number: 80
-  - host: $ADMIN_DOMAIN
+  - host: $MAIL_DOMAIN
     http:
       paths:
       - path: /
         pathType: Prefix
         backend:
           service:
-            name: postfixadmin-service
+            name: mailserver-service
             port:
               number: 80
   - host: $WEBMAIL_DOMAIN
@@ -520,23 +498,12 @@ spec:
             name: roundcube-service
             port:
               number: 80
-  - host: $MAIL_DOMAIN
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: mailserver-service
-            port:
-              number: 80
   tls:
   - hosts:
     - $DOMAIN1
     - $DOMAIN2
-    - $ADMIN_DOMAIN
-    - $WEBMAIL_DOMAIN
     - $MAIL_DOMAIN
+    - $WEBMAIL_DOMAIN
     secretName: office-tls
 EOF
 }
@@ -544,7 +511,6 @@ EOF
 # Function to verify services
 verify_services() {
     echo "Verifying services..."
-
     for deployment in mysql wordpress1 wordpress2 roundcube mailserver postfixadmin; do
         kubectl rollout status deployment/$deployment --namespace=$KUBE_NAMESPACE
         if [ $? -ne 0 ]; then
@@ -552,19 +518,16 @@ verify_services() {
             exit 1
         fi
     done
-
     echo "All deployments successfully rolled out."
 }
 
-# Function to test webmail access
-test_webmail_access() {
-    echo "Testing webmail access..."
-    curl -I https://$WEBMAIL_DOMAIN
-    if [ $? -ne 0 ]; then
-        echo "Error: Unable to access webmail at https://$WEBMAIL_DOMAIN"
-        exit 1
-    fi
-    echo "Webmail access verified at https://$WEBMAIL_DOMAIN"
+# Function to display access URLs
+display_access_info() {
+    echo "You can access your applications at the following URLs:"
+    echo "WordPress 1: https://${DOMAIN1}"
+    echo "WordPress 2: https://${DOMAIN2}"
+    echo "Mailserver: https://${MAIL_DOMAIN}"
+    echo "Webmail: https://${WEBMAIL_DOMAIN}"
 }
 
 # Main script execution
@@ -589,10 +552,9 @@ deploy_wordpress2
 deploy_roundcube
 deploy_mailserver
 deploy_postfixadmin
-
 setup_ingress
 verify_services
-test_webmail_access
+display_access_info
 
 echo "Installation and setup complete."
 

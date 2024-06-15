@@ -38,7 +38,7 @@ install_minikube() {
 # Function to start Minikube
 start_minikube() {
   echo "Starting Minikube..."
-  sudo minikube start --driver=docker
+  sudo minikube start --driver=docker --force
 }
 
 # Function to configure UFW firewall

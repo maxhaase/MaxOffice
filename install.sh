@@ -7,7 +7,7 @@ source vars.env
 install_dependencies() {
   echo "Installing dependencies..."
   sudo apt-get update
-  sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw jq
+  sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw jq conntrack
 }
 
 # Function to install Docker
@@ -38,7 +38,7 @@ install_minikube() {
 # Function to start Minikube
 start_minikube() {
   echo "Starting Minikube..."
-  sudo minikube start --driver=docker --force
+  sudo -u $USER minikube start --driver=none
   if [ $? -ne 0 ]; then
     echo "Minikube failed to start, exiting."
     exit 1

@@ -39,6 +39,10 @@ install_minikube() {
 start_minikube() {
   echo "Starting Minikube..."
   sudo minikube start --driver=docker --force
+  if [ $? -ne 0 ]; then
+    echo "Minikube failed to start, exiting."
+    exit 1
+  fi
 }
 
 # Function to configure UFW firewall

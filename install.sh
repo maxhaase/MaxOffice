@@ -11,30 +11,59 @@ source vars.env
 install_dependencies() {
     echo "Installing dependencies..."
     sudo apt-get update
-    sudo apt-get install -y ca-certificates curl software-properties-common ufw apt-transport-https
+    sudo apt-get install -y ca-certificates curl software-properties-common ufw apt-transport-https conntrack
+}
+
+# Function to install Docker
+install_docker() {
+    if ! command -v docker &> /dev/null; then
+        echo "Installing Docker..."
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+        sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+        sudo apt-get update
+        sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+        sudo usermod -aG docker $USER
+        newgrp docker
+    else
+        echo "Docker is already installed."
+    fi
 }
 
 # Function to install kubectl
 install_kubectl() {
-    echo "Installing kubectl..."
-    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-    chmod +x kubectl
-    sudo mv kubectl /usr/local/bin/
+    if ! command -v kubectl &> /dev/null; then
+        echo "Installing kubectl..."
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+    else
+        echo "kubectl is already installed."
+    fi
 }
 
 # Function to install Minikube
 install_minikube() {
-    echo "Installing Minikube..."
-    curl -LO "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64"
-    chmod +x minikube-linux-amd64
-    sudo mv minikube-linux-amd64 /usr/local/bin/minikube
+    if ! command -v minikube &> /dev/null; then
+        echo "Installing Minikube..."
+        curl -LO "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64"
+        chmod +x minikube-linux-amd64
+        sudo mv minikube-linux-amd64 /usr/local/bin/minikube
+    else
+        echo "Minikube is already installed."
+    fi
 }
 
 # Function to start Minikube
 start_minikube() {
     echo "Starting Minikube..."
     sudo sysctl fs.protected_regular=0
-    sudo minikube start --driver=docker --force --wait=false
+    minikube start --driver=docker --force --wait=false
+    sleep 60
+    kubectl cluster-info
+    if [ $? -ne 0 ]; then
+        echo "Error: Minikube failed to start correctly."
+        exit 1
+    fi
 }
 
 # Function to set up Kubernetes namespace
@@ -54,7 +83,7 @@ metadata:
   namespace: $KUBE_NAMESPACE
 spec:
   accessModes:
-  - ReadWriteOnce
+    - ReadWriteOnce
   resources:
     requests:
       storage: 10Gi
@@ -77,7 +106,7 @@ spec:
     spec:
       containers:
       - name: mysql
-        image: mysql:${MYSQL_VERSION}
+        image: mysql:5.7
         env:
         - name: MYSQL_ROOT_PASSWORD
           value: $MYSQL_ROOT_PASSWORD
@@ -107,15 +136,22 @@ metadata:
 spec:
   ports:
   - port: 3306
+    targetPort: 3306
   selector:
     app: mysql
 EOF
 }
 
+# Function to wait for MySQL to be ready
+wait_for_mysql() {
+    echo "Waiting for MySQL to be ready..."
+    kubectl wait --namespace $KUBE_NAMESPACE --for=condition=ready pod -l app=mysql --timeout=300s
+}
+
 # Function to check MySQL database connection
 check_db_connection() {
     echo "Checking database connection..."
-    kubectl run mysql-client --rm --tty -i --restart='Never' --namespace $KUBE_NAMESPACE --image=mysql:${MYSQL_VERSION} --command -- mysql -h mysql-service -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SHOW DATABASES;"
+    kubectl run mysql-client --rm --tty -i --restart='Never' --namespace $KUBE_NAMESPACE --image=mysql:5.7 --command -- mysql -h mysql-service -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SHOW DATABASES;"
     if [ $? -ne 0 ]; then
         echo "Error: Unable to connect to MySQL database."
         exit 1
@@ -142,7 +178,7 @@ spec:
     spec:
       containers:
       - name: wordpress
-        image: wordpress:$WORDPRESS_VERSION
+        image: wordpress:latest
         env:
         - name: WORDPRESS_DB_HOST
           value: mysql-service
@@ -191,7 +227,7 @@ spec:
     spec:
       containers:
       - name: wordpress
-        image: wordpress:$WORDPRESS_VERSION
+        image: wordpress:latest
         env:
         - name: WORDPRESS_DB_HOST
           value: mysql-service
@@ -300,7 +336,7 @@ spec:
         - name: MAILSERVER_SSL_TYPE
           value: letsencrypt
         - name: LETSENCRYPT_EMAIL
-          value: $CERT_EMAIL
+          value: $CERT_MANAGER_EMAIL
         ports:
         - containerPort: $SMTP_PORT
           name: smtp
@@ -418,11 +454,13 @@ cleanup_kubernetes() {
 # Function to run the script
 run() {
     install_dependencies
+    install_docker
     install_kubectl
     install_minikube
     start_minikube
     setup_namespace
     deploy_mysql
+    wait_for_mysql
     check_db_connection
     deploy_wordpress1
     deploy_wordpress2
@@ -430,6 +468,14 @@ run() {
     deploy_mailserver
     deploy_postfixadmin
     verify_deployment
+
+    echo "All services deployed successfully."
+    echo "Access the services at the following URLs:"
+    echo "DOMAIN1: http://$DOMAIN1"
+    echo "DOMAIN2: http://$DOMAIN2"
+    echo "Admin: http://$ADMIN_DOMAIN"
+    echo "Webmail: http://$WEBMAIL_DOMAIN"
+    echo "Mailserver: http://$MAIL_DOMAIN"
 }
 
 # Main

@@ -11,7 +11,17 @@ source vars.env
 install_dependencies() {
     echo "Installing dependencies..."
     sudo apt-get update
-    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw
+    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw certbot
+}
+
+# Function to install Docker
+install_docker() {
+    echo "Installing Docker..."
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+    sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+    sudo apt-get update
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+    sudo usermod -aG docker $USER
 }
 
 # Function to install kubectl
@@ -33,44 +43,82 @@ install_minikube() {
 # Function to start Minikube without root privileges
 start_minikube() {
     echo "Starting Minikube..."
-    sudo -u $USER minikube start --driver=docker
+    sudo -u $USER minikube start --driver=docker --memory=4096 --cpus=2
 }
 
 # Function to setup Kubernetes namespace
 setup_namespace() {
     echo "Setting up Kubernetes namespace..."
-    kubectl create namespace $KUBE_NAMESPACE || true
-    echo "Creating service account and role binding..."
+    kubectl get namespace $KUBE_NAMESPACE || kubectl create namespace $KUBE_NAMESPACE
+}
+
+# Function to open necessary ports on Ubuntu VM
+configure_firewall() {
+    echo "Configuring UFW firewall..."
+    sudo ufw allow $SSH_PORT
+    sudo ufw allow $HTTP_PORT
+    sudo ufw allow $HTTPS_PORT
+    sudo ufw allow $SMTP_PORT
+    sudo ufw allow $SMTPS_PORT
+    sudo ufw allow $SMTP_ALT_PORT
+    sudo ufw allow $POP3_PORT
+    sudo ufw allow $POP3S_PORT
+    sudo ufw allow $IMAP_PORT
+    sudo ufw allow $IMAPS_PORT
+    sudo ufw allow $WEBMAIL_PORT
+    sudo ufw allow $DOMAIN1_PORT
+    sudo ufw allow $DOMAIN2_PORT
+    sudo ufw allow $ADMIN_GUI_PORT
+    sudo ufw --force enable
+}
+
+# Function to uninstall Cert-Manager
+uninstall_cert_manager() {
+    echo "Uninstalling Cert-Manager..."
+    kubectl delete -f https://github.com/jetstack/cert-manager/releases/download/v1.7.1/cert-manager.yaml --ignore-not-found
+    kubectl delete namespace cert-manager --ignore-not-found
+    kubectl delete validatingwebhookconfigurations.admissionregistration.k8s.io cert-manager-webhook --ignore-not-found
+    kubectl delete mutatingwebhookconfigurations.admissionregistration.k8s.io cert-manager-webhook --ignore-not-found
+}
+
+# Function to cleanup Kubernetes resources
+cleanup_kubernetes() {
+    echo "Cleaning up Kubernetes resources..."
+    kubectl delete namespace $KUBE_NAMESPACE --ignore-not-found
+    kubectl delete namespace ingress-nginx --ignore-not-found
+    uninstall_cert_manager
+}
+
+# Function to install and configure Nginx Ingress controller
+install_ingress_controller() {
+    echo "Installing Nginx Ingress controller..."
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml
+}
+
+# Function to install and configure Cert-Manager
+install_cert_manager() {
+    echo "Installing Cert-Manager..."
+    kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v1.7.1/cert-manager.yaml
+
+    echo "Waiting for Cert-Manager to be ready..."
+    kubectl wait --namespace cert-manager --for=condition=ready pod --selector=app.kubernetes.io/instance=cert-manager --timeout=120s
+
+    echo "Configuring Cert-Manager ClusterIssuer..."
     kubectl apply -f - <<EOF
-apiVersion: v1
-kind: ServiceAccount
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
 metadata:
-  name: default
-  namespace: $KUBE_NAMESPACE
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  namespace: $KUBE_NAMESPACE
-  name: pod-reader
-rules:
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["get", "watch", "list"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: read-pods
-  namespace: $KUBE_NAMESPACE
-subjects:
-- kind: ServiceAccount
-  name: default
-  namespace: $KUBE_NAMESPACE
-roleRef:
-  kind: Role
-  name: pod-reader
-  apiGroup: rbac.authorization.k8s.io
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: you@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
 EOF
 }
 
@@ -182,6 +230,19 @@ spec:
         ports:
         - containerPort: 80
 EOF
+
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress1-service
+  namespace: $KUBE_NAMESPACE
+spec:
+  ports:
+  - port: 80
+  selector:
+    app: wordpress1
+EOF
 }
 
 # Function to deploy WordPress for DOMAIN2
@@ -217,6 +278,19 @@ spec:
         ports:
         - containerPort: 80
 EOF
+
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress2-service
+  namespace: $KUBE_NAMESPACE
+spec:
+  ports:
+  - port: 80
+  selector:
+    app: wordpress2
+EOF
 }
 
 # Function to deploy Roundcube
@@ -251,6 +325,19 @@ spec:
           value: $ROUNDCUBEMAIL_DB
         ports:
         - containerPort: 80
+EOF
+
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: roundcube-service
+  namespace: $KUBE_NAMESPACE
+spec:
+  ports:
+  - port: 80
+  selector:
+    app: roundcube
 EOF
 }
 
@@ -303,7 +390,9 @@ spec:
       - name: mail-persistent-storage
         persistentVolumeClaim:
           claimName: $KUBE_PVC_NAME_MAIL
----
+EOF
+
+    kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Service
 metadata:
@@ -363,6 +452,93 @@ spec:
         ports:
         - containerPort: 80
 EOF
+
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: postfixadmin-service
+  namespace: $KUBE_NAMESPACE
+spec:
+  ports:
+  - port: 80
+  selector:
+    app: postfixadmin
+EOF
+}
+
+# Function to setup Ingress
+setup_ingress() {
+    echo "Setting up Ingress..."
+    kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: office-ingress
+  namespace: $KUBE_NAMESPACE
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  rules:
+  - host: $DOMAIN1
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: wordpress1-service
+            port:
+              number: 80
+  - host: $DOMAIN2
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: wordpress2-service
+            port:
+              number: 80
+  - host: $ADMIN_DOMAIN
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: postfixadmin-service
+            port:
+              number: 80
+  - host: $WEBMAIL_DOMAIN
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: roundcube-service
+            port:
+              number: 80
+  - host: $MAIL_DOMAIN
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mailserver-service
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - $DOMAIN1
+    - $DOMAIN2
+    - $ADMIN_DOMAIN
+    - $WEBMAIL_DOMAIN
+    - $MAIL_DOMAIN
+    secretName: office-tls
+EOF
 }
 
 # Function to verify services
@@ -393,10 +569,15 @@ test_webmail_access() {
 
 # Main script execution
 install_dependencies
+install_docker
 install_kubectl
 install_minikube
 start_minikube
+configure_firewall
+cleanup_kubernetes
 setup_namespace
+install_ingress_controller
+install_cert_manager
 deploy_mysql
 
 # Wait for MySQL to be ready before proceeding
@@ -409,6 +590,7 @@ deploy_roundcube
 deploy_mailserver
 deploy_postfixadmin
 
+setup_ingress
 verify_services
 test_webmail_access
 

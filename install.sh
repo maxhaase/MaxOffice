@@ -33,7 +33,8 @@ install_minikube() {
 # Function to start Minikube
 start_minikube() {
     echo "Starting Minikube..."
-    minikube start --driver=docker
+    sudo sysctl fs.protected_regular=0
+    sudo minikube start --driver=docker --force --wait=false
 }
 
 # Function to set up Kubernetes namespace
@@ -76,7 +77,7 @@ spec:
     spec:
       containers:
       - name: mysql
-        image: mysql:$MYSQL_VERSION
+        image: mysql:${MYSQL_VERSION}
         env:
         - name: MYSQL_ROOT_PASSWORD
           value: $MYSQL_ROOT_PASSWORD
@@ -114,7 +115,7 @@ EOF
 # Function to check MySQL database connection
 check_db_connection() {
     echo "Checking database connection..."
-    kubectl run mysql-client --rm --tty -i --restart='Never' --namespace $KUBE_NAMESPACE --image=mysql:$MYSQL_VERSION --command -- mysql -h mysql-service -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SHOW DATABASES;"
+    kubectl run mysql-client --rm --tty -i --restart='Never' --namespace $KUBE_NAMESPACE --image=mysql:${MYSQL_VERSION} --command -- mysql -h mysql-service -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SHOW DATABASES;"
     if [ $? -ne 0 ]; then
         echo "Error: Unable to connect to MySQL database."
         exit 1

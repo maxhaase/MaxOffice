@@ -146,6 +146,9 @@ EOF
 wait_for_mysql() {
     echo "Waiting for MySQL to be ready..."
     kubectl wait --namespace $KUBE_NAMESPACE --for=condition=ready pod -l app=mysql --timeout=300s
+    kubectl get pods -n $KUBE_NAMESPACE -o wide
+    kubectl describe pod -l app=mysql -n $KUBE_NAMESPACE
+    sleep 30
 }
 
 # Function to check MySQL database connection
@@ -443,12 +446,6 @@ verify_deployment() {
     kubectl rollout status deployment/roundcube -n $KUBE_NAMESPACE
     kubectl rollout status deployment/mailserver -n $KUBE_NAMESPACE
     kubectl rollout status deployment/postfixadmin -n $KUBE_NAMESPACE
-}
-
-# Function to cleanup Kubernetes resources
-cleanup_kubernetes() {
-    echo "Cleaning up Kubernetes resources..."
-    kubectl delete namespace $KUBE_NAMESPACE --force --grace-period=0
 }
 
 # Function to run the script

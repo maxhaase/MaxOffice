@@ -16,7 +16,7 @@ handle_error() {
 # Function to install dependencies
 install_dependencies() {
     echo "Installing dependencies..."
-    sudo apt-get update || handle_error "Failed to update package lists"
+    sudo apt-get update || handle_error "Failed to update package list"
     sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw || handle_error "Failed to install dependencies"
 }
 
@@ -39,28 +39,26 @@ install_minikube() {
 # Function to start Minikube without root privileges
 start_minikube() {
     echo "Starting Minikube..."
-    minikube delete || true
     sudo -u $USER minikube start --driver=docker || handle_error "Failed to start Minikube"
 }
 
 # Function to check Kubernetes API server availability
 check_k8s_api() {
     echo "Checking Kubernetes API server availability..."
-    for i in {1..12}; do
-        kubectl cluster-info &>/dev/null && break || sleep 5
-        if [ $i -eq 12 ]; then
-            handle_error "Kubernetes API server is not available"
-        fi
+    for i in {1..10}; do
+        kubectl cluster-info && return 0
+        echo "Kubernetes API server is not ready yet. Retrying in 5 seconds..."
+        sleep 5
     done
-    echo "Kubernetes API server is ready."
+    handle_error "Kubernetes API server is not available"
 }
 
 # Function to setup Kubernetes namespace
 setup_namespace() {
     echo "Setting up Kubernetes namespace..."
-    kubectl create namespace $KUBE_NAMESPACE || handle_error "Failed to create namespace"
+    kubectl create namespace $KUBE_NAMESPACE || true
     echo "Creating service account and role binding..."
-    kubectl apply -f - <<EOF || handle_error "Failed to create service account and role binding"
+    kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -153,7 +151,6 @@ metadata:
 spec:
   ports:
   - port: 3306
-    targetPort: 3306
   selector:
     app: mysql
 EOF
@@ -162,14 +159,13 @@ EOF
 # Function to check MySQL connection
 check_db_connection() {
     echo "Checking database connection..."
-    for i in {1..12}; do
+    for i in {1..10}; do
         kubectl run mysql-client --image=mysql:5.7 -i --rm --restart=Never --namespace=$KUBE_NAMESPACE --command -- \
-        mysql -h mysql-service -u$MYSQL_USER -p$MYSQL_PASSWORD -e "SHOW DATABASES;" && break || sleep 5
-        if [ $i -eq 12 ]; then
-            handle_error "Unable to connect to MySQL database."
-        fi
+        mysql -h mysql-service -u$MYSQL_USER -p$MYSQL_PASSWORD -e "SHOW DATABASES;" && return 0
+        echo "Error: Unable to connect to MySQL database. Retrying in 5 seconds..."
+        sleep 5
     done
-    echo "Database connection successful."
+    handle_error "Unable to connect to MySQL database after multiple attempts"
 }
 
 # Function to deploy WordPress for DOMAIN1
@@ -336,25 +332,18 @@ spec:
   ports:
   - port: $SMTP_PORT
     targetPort: smtp
-    name: smtp
   - port: $SMTPS_PORT
     targetPort: smtps
-    name: smtps
   - port: $SMTP_ALT_PORT
     targetPort: smtp-alt
-    name: smtp-alt
   - port: $POP3_PORT
     targetPort: pop3
-    name: pop3
   - port: $POP3S_PORT
     targetPort: pop3s
-    name: pop3s
   - port: $IMAP_PORT
     targetPort: imap
-    name: imap
   - port: $IMAPS_PORT
     targetPort: imaps
-    name: imaps
   selector:
     app: mailserver
 EOF
@@ -398,11 +387,9 @@ EOF
 # Function to verify services
 verify_services() {
     echo "Verifying services..."
-
     for deployment in mysql wordpress1 wordpress2 roundcube mailserver postfixadmin; do
         kubectl rollout status deployment/$deployment --namespace=$KUBE_NAMESPACE || handle_error "Deployment $deployment failed to roll out"
     done
-
     echo "All deployments successfully rolled out."
 }
 

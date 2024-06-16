@@ -7,75 +7,96 @@ exec 2>&1
 # Load environment variables from vars.env
 source vars.env
 
+# Function to handle errors
+handle_error() {
+    echo "Error: $1"
+    exit 1
+}
+
 # Function to install dependencies
 install_dependencies() {
     echo "Installing dependencies..."
-    sudo apt-get update
-    sudo apt-get install -y ca-certificates curl software-properties-common ufw apt-transport-https conntrack
-}
-
-# Function to install Docker
-install_docker() {
-    if ! command -v docker &> /dev/null; then
-        echo "Installing Docker..."
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-        sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-        sudo apt-get update
-        sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-        sudo usermod -aG docker $USER
-        newgrp docker
-    else
-        echo "Docker is already installed."
-    fi
+    sudo apt-get update || handle_error "Failed to update package lists"
+    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw || handle_error "Failed to install dependencies"
 }
 
 # Function to install kubectl
 install_kubectl() {
-    if ! command -v kubectl &> /dev/null; then
-        echo "Installing kubectl..."
-        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        chmod +x kubectl
-        sudo mv kubectl /usr/local/bin/
-    else
-        echo "kubectl is already installed."
-    fi
+    echo "Installing kubectl..."
+    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" || handle_error "Failed to download kubectl"
+    sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl || handle_error "Failed to install kubectl"
+    rm kubectl
 }
 
 # Function to install Minikube
 install_minikube() {
-    if ! command -v minikube &> /dev/null; then
-        echo "Installing Minikube..."
-        curl -LO "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64"
-        chmod +x minikube-linux-amd64
-        sudo mv minikube-linux-amd64 /usr/local/bin/minikube
-    else
-        echo "Minikube is already installed."
-    fi
+    echo "Installing Minikube..."
+    curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64 || handle_error "Failed to download Minikube"
+    sudo install minikube-linux-amd64 /usr/local/bin/minikube || handle_error "Failed to install Minikube"
+    rm minikube-linux-amd64
 }
 
-# Function to start Minikube
+# Function to start Minikube without root privileges
 start_minikube() {
     echo "Starting Minikube..."
-    sudo sysctl fs.protected_regular=0
-    minikube start --driver=docker --force --wait=false
-    sleep 60
-    kubectl cluster-info
-    if [ $? -ne 0 ]; then
-        echo "Error: Minikube failed to start correctly."
-        exit 1
-    fi
+    minikube delete || true
+    sudo -u $USER minikube start --driver=docker || handle_error "Failed to start Minikube"
 }
 
-# Function to set up Kubernetes namespace
+# Function to check Kubernetes API server availability
+check_k8s_api() {
+    echo "Checking Kubernetes API server availability..."
+    for i in {1..12}; do
+        kubectl cluster-info &>/dev/null && break || sleep 5
+        if [ $i -eq 12 ]; then
+            handle_error "Kubernetes API server is not available"
+        fi
+    done
+    echo "Kubernetes API server is ready."
+}
+
+# Function to setup Kubernetes namespace
 setup_namespace() {
     echo "Setting up Kubernetes namespace..."
-    kubectl create namespace $KUBE_NAMESPACE || echo "Namespace already exists"
+    kubectl create namespace $KUBE_NAMESPACE || handle_error "Failed to create namespace"
+    echo "Creating service account and role binding..."
+    kubectl apply -f - <<EOF || handle_error "Failed to create service account and role binding"
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: $KUBE_NAMESPACE
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: $KUBE_NAMESPACE
+  name: pod-reader
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: read-pods
+  namespace: $KUBE_NAMESPACE
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: $KUBE_NAMESPACE
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+EOF
 }
 
 # Function to deploy MySQL
 deploy_mysql() {
     echo "Deploying MySQL..."
-    kubectl apply -f - <<EOF
+    kubectl apply -f - <<EOF || handle_error "Failed to deploy MySQL"
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -87,9 +108,7 @@ spec:
   resources:
     requests:
       storage: 10Gi
-EOF
-
-    kubectl apply -f - <<EOF
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -125,9 +144,7 @@ spec:
       - name: mysql-persistent-storage
         persistentVolumeClaim:
           claimName: mysql-pvc
-EOF
-
-    kubectl apply -f - <<EOF
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -142,29 +159,23 @@ spec:
 EOF
 }
 
-# Function to wait for MySQL to be ready
-wait_for_mysql() {
-    echo "Waiting for MySQL to be ready..."
-    kubectl wait --namespace $KUBE_NAMESPACE --for=condition=ready pod -l app=mysql --timeout=300s
-    kubectl get pods -n $KUBE_NAMESPACE -o wide
-    kubectl describe pod -l app=mysql -n $KUBE_NAMESPACE
-    sleep 30
-}
-
-# Function to check MySQL database connection
+# Function to check MySQL connection
 check_db_connection() {
     echo "Checking database connection..."
-    kubectl run mysql-client --rm --tty -i --restart='Never' --namespace $KUBE_NAMESPACE --image=mysql:5.7 --command -- mysql -h mysql-service -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SHOW DATABASES;"
-    if [ $? -ne 0 ]; then
-        echo "Error: Unable to connect to MySQL database."
-        exit 1
-    fi
+    for i in {1..12}; do
+        kubectl run mysql-client --image=mysql:5.7 -i --rm --restart=Never --namespace=$KUBE_NAMESPACE --command -- \
+        mysql -h mysql-service -u$MYSQL_USER -p$MYSQL_PASSWORD -e "SHOW DATABASES;" && break || sleep 5
+        if [ $i -eq 12 ]; then
+            handle_error "Unable to connect to MySQL database."
+        fi
+    done
+    echo "Database connection successful."
 }
 
 # Function to deploy WordPress for DOMAIN1
 deploy_wordpress1() {
     echo "Deploying WordPress for DOMAIN1..."
-    kubectl apply -f - <<EOF
+    kubectl apply -f - <<EOF || handle_error "Failed to deploy WordPress for DOMAIN1"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -194,26 +205,12 @@ spec:
         ports:
         - containerPort: 80
 EOF
-
-    kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: wordpress1-service
-  namespace: $KUBE_NAMESPACE
-spec:
-  ports:
-  - port: 80
-    targetPort: 80
-  selector:
-    app: wordpress1
-EOF
 }
 
 # Function to deploy WordPress for DOMAIN2
 deploy_wordpress2() {
     echo "Deploying WordPress for DOMAIN2..."
-    kubectl apply -f - <<EOF
+    kubectl apply -f - <<EOF || handle_error "Failed to deploy WordPress for DOMAIN2"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -243,26 +240,12 @@ spec:
         ports:
         - containerPort: 80
 EOF
-
-    kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: wordpress2-service
-  namespace: $KUBE_NAMESPACE
-spec:
-  ports:
-  - port: 80
-    targetPort: 80
-  selector:
-    app: wordpress2
-EOF
 }
 
 # Function to deploy Roundcube
 deploy_roundcube() {
     echo "Deploying Roundcube..."
-    kubectl apply -f - <<EOF
+    kubectl apply -f - <<EOF || handle_error "Failed to deploy Roundcube"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -281,41 +264,23 @@ spec:
       - name: roundcube
         image: roundcube/roundcubemail:latest
         env:
-        - name: ROUNDCUBEMAIL_DEFAULT_HOST
-          value: ssl://$MAIL_DOMAIN
-        - name: ROUNDCUBEMAIL_SMTP_SERVER
-          value: tls://$MAIL_DOMAIN
-        - name: MYSQL_ROOT_PASSWORD
-          value: $MYSQL_ROOT_PASSWORD
-        - name: MYSQL_DATABASE
-          value: $ROUNDCUBEMAIL_DB
-        - name: MYSQL_USER
+        - name: DB_HOST
+          value: mysql-service
+        - name: DB_USER
           value: $ROUNDCUBEMAIL_DB_USER
-        - name: MYSQL_PASSWORD
+        - name: DB_PASSWORD
           value: $ROUNDCUBEMAIL_DB_PASSWORD
+        - name: DB_NAME
+          value: $ROUNDCUBEMAIL_DB
         ports:
         - containerPort: 80
-EOF
-
-    kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: roundcube-service
-  namespace: $KUBE_NAMESPACE
-spec:
-  ports:
-  - port: 80
-    targetPort: 80
-  selector:
-    app: roundcube
 EOF
 }
 
 # Function to deploy Mailserver
 deploy_mailserver() {
     echo "Deploying Mailserver..."
-    kubectl apply -f - <<EOF
+    kubectl apply -f - <<EOF || handle_error "Failed to deploy Mailserver"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -332,14 +297,16 @@ spec:
     spec:
       containers:
       - name: mailserver
-        image: mailserver/docker-mailserver:latest
+        image: mailserver/mailserver:latest
         env:
-        - name: MAILSERVER_HOST
-          value: $MAIL_DOMAIN
-        - name: MAILSERVER_SSL_TYPE
-          value: letsencrypt
-        - name: LETSENCRYPT_EMAIL
-          value: $CERT_MANAGER_EMAIL
+        - name: DB_HOST
+          value: mysql-service
+        - name: DB_USER
+          value: $MAILSERVER_DB_USER
+        - name: DB_PASSWORD
+          value: $MAILSERVER_DB_PASSWORD
+        - name: DB_NAME
+          value: $MAILSERVER_DB
         ports:
         - containerPort: $SMTP_PORT
           name: smtp
@@ -359,9 +326,7 @@ spec:
       - name: mail-persistent-storage
         persistentVolumeClaim:
           claimName: $KUBE_PVC_NAME_MAIL
-EOF
-
-    kubectl apply -f - <<EOF
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -371,18 +336,25 @@ spec:
   ports:
   - port: $SMTP_PORT
     targetPort: smtp
+    name: smtp
   - port: $SMTPS_PORT
     targetPort: smtps
+    name: smtps
   - port: $SMTP_ALT_PORT
     targetPort: smtp-alt
+    name: smtp-alt
   - port: $POP3_PORT
     targetPort: pop3
+    name: pop3
   - port: $POP3S_PORT
     targetPort: pop3s
+    name: pop3s
   - port: $IMAP_PORT
     targetPort: imap
+    name: imap
   - port: $IMAPS_PORT
     targetPort: imaps
+    name: imaps
   selector:
     app: mailserver
 EOF
@@ -391,7 +363,7 @@ EOF
 # Function to deploy PostfixAdmin
 deploy_postfixadmin() {
     echo "Deploying PostfixAdmin..."
-    kubectl apply -f - <<EOF
+    kubectl apply -f - <<EOF || handle_error "Failed to deploy PostfixAdmin"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -410,71 +382,58 @@ spec:
       - name: postfixadmin
         image: postfixadmin/postfixadmin:latest
         env:
-        - name: POSTFIXADMIN_DB_HOST
+        - name: DB_HOST
           value: mysql-service
-        - name: POSTFIXADMIN_DB_USER
+        - name: DB_USER
           value: $POSTFIXADMIN_DB_USER
-        - name: POSTFIXADMIN_DB_PASSWORD
+        - name: DB_PASSWORD
           value: $POSTFIXADMIN_DB_PASSWORD
-        - name: POSTFIXADMIN_DB_NAME
+        - name: DB_NAME
           value: $POSTFIXADMIN_DB
         ports:
         - containerPort: 80
 EOF
-
-    kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: postfixadmin-service
-  namespace: $KUBE_NAMESPACE
-spec:
-  ports:
-  - port: 80
-    targetPort: 80
-  selector:
-    app: postfixadmin
-EOF
 }
 
-# Function to verify the deployment
-verify_deployment() {
+# Function to verify services
+verify_services() {
     echo "Verifying services..."
-    kubectl rollout status deployment/mysql -n $KUBE_NAMESPACE
-    kubectl rollout status deployment/wordpress1 -n $KUBE_NAMESPACE
-    kubectl rollout status deployment/wordpress2 -n $KUBE_NAMESPACE
-    kubectl rollout status deployment/roundcube -n $KUBE_NAMESPACE
-    kubectl rollout status deployment/mailserver -n $KUBE_NAMESPACE
-    kubectl rollout status deployment/postfixadmin -n $KUBE_NAMESPACE
+
+    for deployment in mysql wordpress1 wordpress2 roundcube mailserver postfixadmin; do
+        kubectl rollout status deployment/$deployment --namespace=$KUBE_NAMESPACE || handle_error "Deployment $deployment failed to roll out"
+    done
+
+    echo "All deployments successfully rolled out."
 }
 
-# Function to run the script
-run() {
-    install_dependencies
-    install_docker
-    install_kubectl
-    install_minikube
-    start_minikube
-    setup_namespace
-    deploy_mysql
-    wait_for_mysql
-    check_db_connection
-    deploy_wordpress1
-    deploy_wordpress2
-    deploy_roundcube
-    deploy_mailserver
-    deploy_postfixadmin
-    verify_deployment
-
-    echo "All services deployed successfully."
-    echo "Access the services at the following URLs:"
-    echo "DOMAIN1: http://$DOMAIN1"
-    echo "DOMAIN2: http://$DOMAIN2"
-    echo "Admin: http://$ADMIN_DOMAIN"
-    echo "Webmail: http://$WEBMAIL_DOMAIN"
-    echo "Mailserver: http://$MAIL_DOMAIN"
+# Function to test webmail access
+test_webmail_access() {
+    echo "Testing webmail access..."
+    curl -I https://$WEBMAIL_DOMAIN || handle_error "Unable to access webmail at https://$WEBMAIL_DOMAIN"
+    echo "Webmail access verified at https://$WEBMAIL_DOMAIN"
 }
 
-# Main
-run
+# Main script execution
+install_dependencies
+install_kubectl
+install_minikube
+start_minikube
+check_k8s_api
+setup_namespace
+deploy_mysql
+
+# Wait for MySQL to be ready before proceeding
+sleep 30
+check_db_connection
+
+deploy_wordpress1
+deploy_wordpress2
+deploy_roundcube
+deploy_mailserver
+deploy_postfixadmin
+
+verify_services
+test_webmail_access
+
+echo "Installation and setup complete."
 

@@ -71,7 +71,7 @@ install_minikube() {
 # Function to start Minikube without root privileges
 start_minikube() {
     log "INFO" "Starting Minikube..."
-    sudo -u $USER minikube start --driver=docker
+    sudo -u $USER minikube start --driver=docker --cpus=4 --memory=4096
     if [ $? -ne 0 ]; then
         log "ERROR" "Failed to start Minikube. Checking logs..."
         minikube logs
@@ -106,7 +106,7 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["get", "watch", "list"]
+  verbs: ["get", watch", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -185,7 +185,7 @@ metadata:
 spec:
   ports:
   - port: 3306
-    targetPort: mysql
+    targetPort: 3306
     name: mysql
   selector:
     app: mariadb
@@ -195,7 +195,7 @@ EOF
 # Function to check MariaDB connection
 check_db_connection() {
     log "INFO" "Checking database connection..."
-    kubectl run mariadb-client --image=mariadb:10.5 --restart=Never --rm -i --namespace=$KUBE_NAMESPACE --command -- \
+    kubectl run mariadb-client --image=mariadb:latest --restart=Never --rm -i --namespace=$KUBE_NAMESPACE --command -- \
     bash -c "mysql -h mariadb-service -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'SHOW DATABASES;'" || {
         log "ERROR" "Unable to connect to MariaDB database. Fetching diagnostic information..."
         
@@ -285,8 +285,6 @@ spec:
         - containerPort: 80
           name: http
 EOF
-    else
-        log "INFO" "DOMAIN2 is not set. Skipping deployment of WordPress for DOMAIN2."
     fi
 }
 

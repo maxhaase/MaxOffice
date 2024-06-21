@@ -1,4 +1,6 @@
 #!/bin/bash
+# Author: Max Haase - maxhaase@gmail.com
+##############################################################################################
 
 # Redirect all output to a log file
 exec > >(tee -i cleanup.log)

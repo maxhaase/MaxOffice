@@ -1,4 +1,6 @@
 #!/bin/bash
+# Author: Max Haase - maxhaase@gmail.com
+##############################################################################################
 
 # Load environment variables from vars.env
 source vars.env

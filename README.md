@@ -1,2 +1,2 @@
-# Office Magic
-Easy to deploy office solution with online tools (Mail server &amp; WordPress CMS)  for small to mid-size enterprises. 
+# MaxOffice
+## Easy to deploy complete Kubernetes office solution in AWSMail server &amp; Webmail, Admin GUI, Collaboration... etc)  for small to mid-size enterprises. 

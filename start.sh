@@ -1,22 +1,22 @@
 #!/bin/bash
 
-##############################################
-# MaxOffice Setup Script
-# Author: Max Haase - maxhaase@gmail.com
-# This script creates a startup office Kubernetes cluster with multiple domains
-# including mail server, webmail, Admin GUI, WordPress, storage server, and collaboration server.
-##############################################
-
 # Load environment variables from vars.env
 if [ ! -f vars.env ]; then
-  echo "Error: vars.env file not found!"
-  exit 1
+    echo "Error: vars.env file not found!"
+    exit 1
 fi
 
 source vars.env
 
+# Function to log messages
+log() {
+    local level="$1"
+    shift
+    echo "[$level] $(date '+%Y-%m-%d %H:%M:%S') $*"
+}
+
 # Redirect all output to a log file
-exec > >(tee -i logs.log)
+exec > >(tee -i install.log)
 exec 2>&1
 
 # Function to handle errors
@@ -25,262 +25,564 @@ handle_error() {
     exit 1
 }
 
+# Function to retry a command up to a specified number of times
+retry_command() {
+    local retries=$1
+    shift
+    local command="$@"
+    local attempt=0
+
+    until $command; do
+        attempt=$((attempt+1))
+        if [ $attempt -ge $retries ]; then
+            handle_error "Command failed after $retries attempts: $command"
+        fi
+        echo "Retrying command ($attempt/$retries): $command"
+        sleep 2
+    done
+}
+
 # Function to clean environment
 clean_environment() {
-    echo "Cleaning environment..."
+    log "INFO" "Cleaning environment..."
     minikube delete || true
     sudo rm -rf /etc/docker/certs.d /etc/docker/key.json /var/lib/minikube /root/.minikube /root/.kube || true
     sudo rm -rf /home/$USER/.minikube /home/$USER/.kube || true
     sudo ufw disable || true
 }
 
-# Function to install missing dependencies
+# Function to install dependencies
 install_dependencies() {
-    echo "Installing dependencies..."
-    local required_packages=("apt-transport-https" "ca-certificates" "curl" "software-properties-common" "ufw" "wget" "git" "build-essential")
-    local packages_to_install=()
-
-    for package in "${required_packages[@]}"; do
-        if ! dpkg -l | grep -q "^ii  $package "; then
-            packages_to_install+=("$package")
-        fi
-    done
-
-    if [ ${#packages_to_install[@]} -gt 0 ]; then
-        sudo apt-get update || handle_error "Failed to update package list"
-        sudo apt-get install -y "${packages_to_install[@]}" || handle_error "Failed to install required packages: ${packages_to_install[*]}"
-    else
-        echo "All required packages are already installed"
-    fi
-}
-
-# Function to check if a tool is installed
-check_tool() {
-    local tool=$1
-    command -v $tool &> /dev/null
+    log "INFO" "Installing dependencies..."
+    sudo apt-get update || handle_error "Failed to update package list"
+    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw wget git build-essential || handle_error "Failed to install required packages"
 }
 
 # Function to install Docker
 install_docker() {
-    if ! check_tool docker; then
-        echo "Installing Docker..."
-        sudo apt-get update
-        sudo apt-get install -y docker.io
+    if ! command -v docker &> /dev/null; then
+        log "INFO" "Installing Docker..."
+        sudo apt-get install -y docker.io || handle_error "Failed to install Docker"
         sudo systemctl start docker
         sudo systemctl enable docker
+        sudo usermod -aG docker $USER
     else
-        echo "Docker is already installed"
+        log "INFO" "Docker is already installed"
     fi
 }
 
 # Function to install kubectl
 install_kubectl() {
-    if ! check_tool kubectl; then
-        echo "Installing kubectl..."
-        curl -LO "$KUBECTL_URL" || handle_error "Failed to download kubectl"
+    if ! command -v kubectl &> /dev/null; then
+        log "INFO" "Installing kubectl..."
+        retry_command 3 curl -LO "$KUBECTL_URL"
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl || handle_error "Failed to install kubectl"
         rm kubectl
     else
-        echo "kubectl is already installed"
+        log "INFO" "kubectl is already installed"
     fi
 }
 
 # Function to install Minikube
 install_minikube() {
-    if ! check_tool minikube; then
-        echo "Installing Minikube..."
-        curl -LO "$MINIKUBE_URL" || handle_error "Failed to download Minikube"
+    if ! command -v minikube &> /dev/null; then
+        log "INFO" "Installing Minikube..."
+        retry_command 3 curl -Lo minikube-linux-amd64 "$MINIKUBE_URL"
         sudo install minikube-linux-amd64 /usr/local/bin/minikube || handle_error "Failed to install Minikube"
         rm minikube-linux-amd64
     else
-        echo "Minikube is already installed"
+        log "INFO" "Minikube is already installed"
     fi
 }
 
 # Function to install crictl
 install_crictl() {
-    if ! check_tool crictl; then
-        echo "Installing crictl..."
-        curl -LO "$CRICTL_URL" || handle_error "Failed to download crictl"
-        sudo tar -C /usr/local/bin -xzf crictl-v1.24.0-linux-amd64.tar.gz || handle_error "Failed to extract crictl"
-        rm crictl-v1.24.0-linux-amd64.tar.gz
+    if ! command -v crictl &> /dev/null; then
+        log "INFO" "Installing crictl..."
+        retry_command 3 curl -Lo crictl.tar.gz "$CRICTL_URL"
+        sudo tar zxvf crictl.tar.gz -C /usr/local/bin || handle_error "Failed to install crictl"
+        rm crictl.tar.gz
     else
-        echo "crictl is already installed"
-    fi
-}
-
-# Function to install Go
-install_go() {
-    if ! check_tool go; then
-        echo "Installing Go..."
-        wget "$GO_URL" -O go.tar.gz || handle_error "Failed to download Go"
-        sudo tar -C /usr/local -xzf go.tar.gz || handle_error "Failed to extract Go"
-        rm go.tar.gz
-        echo "export PATH=\$PATH:/usr/local/go/bin" >> ~/.profile
-        source ~/.profile
-    else
-        echo "Go is already installed"
+        log "INFO" "crictl is already installed"
     fi
 }
 
 # Function to install cri-dockerd
 install_cri_dockerd() {
-    if ! check_tool cri-dockerd; then
-        echo "Installing cri-dockerd..."
-        install_go
-        if [ -d "cri-dockerd" ]; then
-            sudo rm -rf cri-dockerd
-        fi
-        git clone "$CRI_DOCKERD_REPO" || handle_error "Failed to clone cri-dockerd"
-        cd cri-dockerd || handle_error "Failed to enter cri-dockerd directory"
+    if ! command -v cri-dockerd &> /dev/null; then
+        log "INFO" "Installing cri-dockerd..."
+        retry_command 3 git clone https://github.com/Mirantis/cri-dockerd.git
+        cd cri-dockerd || handle_error "Failed to change directory to cri-dockerd"
         mkdir -p bin
-        /usr/local/go/bin/go build -o bin/cri-dockerd || handle_error "Failed to build cri-dockerd"
-        sudo mv bin/cri-dockerd /usr/local/bin/
+        go get && go build -o bin/cri-dockerd || handle_error "Failed to build cri-dockerd"
+        sudo install bin/cri-dockerd /usr/local/bin/ || handle_error "Failed to install cri-dockerd"
         cd ..
         rm -rf cri-dockerd
     else
-        echo "cri-dockerd is already installed"
+        log "INFO" "cri-dockerd is already installed"
     fi
 }
 
-# Function to configure Docker group
-configure_docker_group() {
-    # Ensure Docker group exists
-    if ! getent group docker; then
-        sudo groupadd docker
-    fi
-
-    # Add the user to the Docker group
-    if ! groups $USER | grep -q "\bdocker\b"; then
-        sudo usermod -aG docker $USER
-        echo "You have been added to the Docker group. Restarting script with new group membership..."
-        sudo chmod 666 /var/run/docker.sock
-        exec sg docker "$0"
-        exit 0
+# Function to install Go
+install_go() {
+    if ! command -v go &> /dev/null; then
+        log "INFO" "Installing Go..."
+        retry_command 3 wget https://dl.google.com/go/go1.16.5.linux-amd64.tar.gz
+        sudo tar -C /usr/local -xzf go1.16.5.linux-amd64.tar.gz || handle_error "Failed to extract Go"
+        export PATH=$PATH:/usr/local/go/bin
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.profile
+        rm go1.16.5.linux-amd64.tar.gz
+    else
+        log "INFO" "Go is already installed"
     fi
 }
 
-# Function to start Minikube
+# Function to start Minikube without root privileges
 start_minikube() {
-    echo "Starting Minikube..."
-    minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=${MINIKUBE_MEMORY}mb || handle_error "Failed to start Minikube"
+    log "INFO" "Starting Minikube..."
+    sudo -u $USER minikube start --driver=docker --cpus=4 --memory=4096
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to start Minikube. Checking logs..."
+        minikube logs
+        log "INFO" "Attempting to restart Minikube..."
+        sudo -u $USER minikube stop
+        sudo -u $USER minikube delete
+        sudo -u $USER minikube start --driver=docker --cpus=4 --memory=4096
+        if [ $? -ne 0 ]; then
+            log "ERROR" "Failed to restart Minikube. Exiting."
+            exit 1
+        fi
+    fi
 }
 
-# Function to check Kubernetes API server availability
-check_k8s_api() {
-    echo "Checking Kubernetes API server availability..."
-    for i in {1..10}; do
-        kubectl cluster-info && return 0
-        echo "Kubernetes API server is not ready yet. Retrying in 5 seconds..."
-        sleep 5
-    done
-    handle_error "Kubernetes API server is not available after multiple attempts"
-}
-
-# Function to set up Kubernetes namespace
+# Function to setup Kubernetes namespace
 setup_namespace() {
-    echo "Setting up Kubernetes namespace..."
-    kubectl get namespace $KUBE_NAMESPACE &> /dev/null || kubectl create namespace $KUBE_NAMESPACE || handle_error "Failed to create namespace"
+    log "INFO" "Setting up Kubernetes namespace..."
+    kubectl get namespace $KUBE_NAMESPACE || kubectl create namespace $KUBE_NAMESPACE
+    log "INFO" "Creating service account and role binding..."
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: $KUBE_NAMESPACE
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: $KUBE_NAMESPACE
+  name: pod-reader
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: read-pods
+  namespace: $KUBE_NAMESPACE
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: $KUBE_NAMESPACE
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+EOF
 }
 
-# Function to create MySQL secret
-create_mysql_secret() {
-    echo "Creating MySQL secret..."
-    kubectl create secret generic mysql-secret \
-        --from-literal=root-password=$MYSQL_ROOT_PASSWORD \
-        --from-literal=username=$MYSQL_USER \
-        --from-literal=password=$MYSQL_PASSWORD \
-        --namespace=$KUBE_NAMESPACE --dry-run=client -o yaml | kubectl apply -f - || handle_error "Failed to create MySQL secret"
-}
-
-# Function to deploy MySQL
-deploy_mysql() {
-    echo "Deploying MySQL..."
-    cat <<EOF | kubectl apply -f - || handle_error "Failed to deploy MySQL"
+# Function to deploy MariaDB
+deploy_mariadb() {
+    log "INFO" "Deploying MariaDB..."
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mariadb-pvc
+  namespace: $KUBE_NAMESPACE
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mysql
+  name: mariadb
   namespace: $KUBE_NAMESPACE
 spec:
   selector:
     matchLabels:
-      app: mysql
-  strategy:
-    type: Recreate
+      app: mariadb
   template:
     metadata:
       labels:
-        app: mysql
+        app: mariadb
     spec:
       containers:
-      - image: mysql:5.7
-        name: mysql
+      - name: mariadb
+        image: mariadb:latest
         env:
         - name: MYSQL_ROOT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mysql-secret
-              key: root-password
+          value: $MYSQL_ROOT_PASSWORD
         - name: MYSQL_DATABASE
-          value: "$MYSQL_DATABASE"
+          value: $MYSQL_DATABASE
         - name: MYSQL_USER
-          value: "$MYSQL_USER"
+          value: $MYSQL_USER
         - name: MYSQL_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mysql-secret
-              key: password
+          value: $MYSQL_PASSWORD
         ports:
         - containerPort: 3306
           name: mysql
         volumeMounts:
-        - name: mysql-persistent-storage
-          mountPath: /var/lib/mysql
+        - mountPath: /var/lib/mysql
+          name: mariadb-persistent-storage
       volumes:
-      - name: mysql-persistent-storage
+      - name: mariadb-persistent-storage
+        persistentVolumeClaim:
+          claimName: mariadb-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb-service
+  namespace: $KUBE_NAMESPACE
+spec:
+  ports:
+  - port: 3306
+    targetPort: 3306
+    name: mysql
+  selector:
+    app: mariadb
+EOF
+}
+
+# Check MariaDB connection
+check_db_connection() {
+    log "INFO" "Checking database connection..."
+    kubectl run mariadb-client --image=mariadb:latest --restart=Never --rm -i --namespace=$KUBE_NAMESPACE --command -- \
+    bash -c "mysql -h mariadb-service -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'SHOW DATABASES;'" || {
+        log "ERROR" "Unable to connect to MariaDB database. Fetching diagnostic information..."
+        
+        # Describe the MariaDB pod and service
+        kubectl describe pod -l app=mariadb --namespace=$KUBE_NAMESPACE
+        kubectl describe service mariadb-service --namespace=$KUBE_NAMESPACE
+        
+        # Fetch logs from the MariaDB pod
+        kubectl logs -l app=mariadb --namespace=$KUBE_NAMESPACE
+        
+        # Check endpoints and service configuration
+        kubectl get endpoints mariadb-service --namespace=$KUBE_NAMESPACE
+        kubectl get svc mariadb-service --namespace=$KUBE_NAMESPACE -o yaml
+        
+        exit 1
+    }
+}
+
+# Deploy WordPress for DOMAIN1
+deploy_wordpress1() {
+    log "INFO" "Deploying WordPress for DOMAIN1..."
+    kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress1
+  namespace: $KUBE_NAMESPACE
+spec:
+  selector:
+    matchLabels:
+      app: wordpress1
+  template:
+    metadata:
+      labels:
+        app: wordpress1
+    spec:
+      containers:
+      - name: wordpress
+        image: wordpress:latest
+        env:
+        - name: WORDPRESS_DB_HOST
+          value: mariadb-service
+        - name: WORDPRESS_DB_USER
+          value: $WORDPRESS_DB_USER_DOMAIN1
+        - name: WORDPRESS_DB_PASSWORD
+          value: $WORDPRESS_DB_PASSWORD_DOMAIN1
+        - name: WORDPRESS_DB_NAME
+          value: $WORDPRESS_DB_DOMAIN1
+        ports:
+        - containerPort: 80
+          name: http
+EOF
+}
+
+# Deploy WordPress for DOMAIN2
+deploy_wordpress2() {
+    if [ -n "$DOMAIN2" ]; then
+        log "INFO" "Deploying WordPress for DOMAIN2..."
+        kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress2
+  namespace: $KUBE_NAMESPACE
+spec:
+  selector:
+    matchLabels:
+      app: wordpress2
+  template:
+    metadata:
+      labels:
+        app: wordpress2
+    spec:
+      containers:
+      - name: wordpress
+        image: wordpress:latest
+        env:
+        - name: WORDPRESS_DB_HOST
+          value: mariadb-service
+        - name: WORDPRESS_DB_USER
+          value: $WORDPRESS_DB_USER_DOMAIN2
+        - name: WORDPRESS_DB_PASSWORD
+          value: $WORDPRESS_DB_PASSWORD_DOMAIN2
+        - name: WORDPRESS_DB_NAME
+          value: $WORDPRESS_DB_DOMAIN2
+        ports:
+        - containerPort: 80
+          name: http
+EOF
+    fi
+}
+
+# Deploy Roundcube
+deploy_roundcube() {
+    log "INFO" "Deploying Roundcube..."
+    kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: roundcube
+  namespace: $KUBE_NAMESPACE
+spec:
+  selector:
+    matchLabels:
+      app: roundcube
+  template:
+    metadata:
+      labels:
+        app: roundcube
+    spec:
+      containers:
+      - name: roundcube
+        image: roundcube/roundcubemail:latest
+        env:
+        - name: DB_HOST
+          value: mariadb-service
+        - name: DB_USER
+          value: $ROUNDCUBEMAIL_DB_USER
+        - name: DB_PASSWORD
+          value: $ROUNDCUBEMAIL_DB_PASSWORD
+        - name: DB_NAME
+          value: $ROUNDCUBEMAIL_DB
+        ports:
+        - containerPort: $WEBMAIL_PORT
+          name: webmail
+EOF
+}
+
+# Deploy Mailserver
+deploy_mailserver() {
+    log "INFO" "Deploying Mailserver..."
+    kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailserver
+  namespace: $KUBE_NAMESPACE
+spec:
+  selector:
+    matchLabels:
+      app: mailserver
+  template:
+    metadata:
+      labels:
+        app: mailserver
+    spec:
+      containers:
+      - name: mailserver
+        image: mailserver/mailserver:latest
+        env:
+        - name: DB_HOST
+          value: mariadb-service
+        - name: DB_USER
+          value: $MAILSERVER_DB_USER
+        - name: DB_PASSWORD
+          value: $MAILSERVER_DB_PASSWORD
+        - name: DB_NAME
+          value: $MAILSERVER_DB
+        ports:
+        - containerPort: $SMTP_PORT
+          name: smtp
+        - containerPort: $SMTPS_PORT
+          name: smtps
+        - containerPort: $SMTP_ALT_PORT
+          name: smtp-alt
+        - containerPort: $POP3_PORT
+          name: pop3
+        - containerPort: $POP3S_PORT
+          name: pop3s
+        - containerPort: $IMAP_PORT
+          name: imap
+        - containerPort: $IMAPS_PORT
+          name: imaps
+      volumes:
+      - name: mail-persistent-storage
         persistentVolumeClaim:
           claimName: $KUBE_PVC_NAME_MAIL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: $KUBE_SERVICE_NAME_MAILSERVER
+  namespace: $KUBE_NAMESPACE
+spec:
+  ports:
+  - port: $SMTP_PORT
+    targetPort: smtp
+    name: smtp
+  - port: $SMTPS_PORT
+    targetPort: smtps
+    name: smtps
+  - port: $SMTP_ALT_PORT
+    targetPort: smtp-alt
+    name: smtp-alt
+  - port: $POP3_PORT
+    targetPort: pop3
+    name: pop3
+  - port: $POP3S_PORT
+    targetPort: pop3s
+    name: pop3s
+  - port: $IMAP_PORT
+    targetPort: imap
+    name: imap
+  - port: $IMAPS_PORT
+    targetPort: imaps
+    name: imaps
+  selector:
+    app: mailserver
 EOF
-
-    kubectl rollout status deployment/mysql --namespace=$KUBE_NAMESPACE || handle_error "Deployment mysql failed to roll out"
 }
 
-# Function to check MySQL database connection
-check_db_connection() {
-    echo "Checking MySQL database connection..."
-    for i in {1..10}; do
-        kubectl run mysql-client --rm --tty -i --restart='Never' --namespace $KUBE_NAMESPACE --image=mysql:5.7 --command -- mysql -h mysql.$KUBE_NAMESPACE.svc.cluster.local -u$MYSQL_USER -p$MYSQL_PASSWORD -e "SHOW DATABASES;" && return 0
-        echo "Error: Unable to connect to MySQL database. Retrying in 5 seconds..."
-        sleep 5
+# Function to deploy PostfixAdmin
+deploy_postfixadmin() {
+    log "INFO" "Deploying PostfixAdmin..."
+    kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postfixadmin
+  namespace: $KUBE_NAMESPACE
+spec:
+  selector:
+    matchLabels:
+      app: postfixadmin
+  template:
+    metadata:
+      labels:
+        app: postfixadmin
+    spec:
+      containers:
+      - name: postfixadmin
+        image: postfixadmin/postfixadmin:latest
+        env:
+        - name: DB_HOST
+          value: mariadb-service
+        - name: DB_USER
+          value: $POSTFIXADMIN_DB_USER
+        - name: DB_PASSWORD
+          value: $POSTFIXADMIN_DB_PASSWORD
+        - name: DB_NAME
+          value: $POSTFIXADMIN_DB
+        ports:
+        - containerPort: 80
+          name: http
+EOF
+}
+
+# Verify services
+verify_services() {
+    log "INFO" "Verifying services..."
+    for deployment in mariadb wordpress1 wordpress2 roundcube mailserver postfixadmin; do
+        kubectl rollout status deployment/$deployment --namespace=$KUBE_NAMESPACE
+        if [ $? -ne 0 ]; then
+            log "ERROR" "Deployment $deployment failed to roll out."
+            log "INFO" "Fetching deployment details for $deployment..."
+            kubectl describe deployment $deployment --namespace=$KUBE_NAMESPACE
+            log "INFO" "Fetching logs for $deployment..."
+            kubectl logs deployment/$deployment --namespace=$KUBE_NAMESPACE
+            exit 1
+        fi
     done
-    handle_error "Unable to connect to MySQL database after multiple attempts"
+    log "INFO" "All deployments successfully rolled out."
 }
 
-# Function for dry-run with Let's Encrypt to avoid hitting request limits
-dry_run_letsencrypt() {
-    echo "Performing Let's Encrypt dry-run for certificates..."
-    certbot certonly --dry-run --standalone -d $DOMAIN1 -d $MAIL_DOMAIN -d $ADMIN_DOMAIN -d $WEBMAIL_DOMAIN --email $CERT_MANAGER_EMAIL --agree-tos --non-interactive || handle_error "Failed Let's Encrypt dry-run"
+# Test webmail access
+test_webmail_access() {
+    log "INFO" "Testing webmail access..."
+    curl -I https://$WEBMAIL_DOMAIN
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Unable to access webmail at https://$WEBMAIL_DOMAIN"
+        exit 1
+    fi
+    log "INFO" "Webmail access verified at https://$WEBMAIL_DOMAIN"
 }
 
-main() {
-    clean_environment
-    install_dependencies
-    install_docker
-    install_kubectl
-    install_minikube
-    install_crictl
-    install_cri_dockerd
-    configure_docker_group
-    start_minikube
-    check_k8s_api
-    setup_namespace
-    create_mysql_secret
-    deploy_mysql
-    check_db_connection
-    dry_run_letsencrypt
-    echo "Setup complete. Services are running."
+# Check if port 8080 is in use
+check_port_8080() {
+    log "INFO" "Checking if port 8080 is in use..."
+    if sudo lsof -i:8080 &> /dev/null; then
+        log "ERROR" "Port 8080 is currently in use. Please resolve this conflict before proceeding."
+        exit 1
+    else
+        log "INFO" "Port 8080 is free."
+    fi
 }
 
-main "$@"
+# Main script execution
+clean_environment
+install_dependencies
+install_docker
+install_kubectl
+install_minikube
+install_crictl
+install_cri_dockerd
+install_go
+check_port_8080
+start_minikube
+setup_namespace
+deploy_mariadb
+
+# Wait for MariaDB to be ready before proceeding
+sleep 30
+check_db_connection
+
+deploy_wordpress1
+deploy_wordpress2
+deploy_roundcube
+deploy_mailserver
+deploy_postfixadmin
+
+verify_services
+test_webmail_access
+
+log "INFO" "Installation and setup complete."
+log "INFO" "Access the services at the following URLs:"
+log "INFO" "WordPress (DOMAIN1): http://$DOMAIN1"
+log "INFO" "WordPress (DOMAIN2): http://$DOMAIN2"
+log "INFO" "PostfixAdmin: http://admin.$DOMAIN1"
+log "INFO" "Roundcube Webmail: http://webmail.$DOMAIN1"
+log "INFO" "Mail server: mail.$DOMAIN1"
 

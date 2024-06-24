@@ -1,13 +1,11 @@
-
-#!/bin/bash
-
-# Executable file for MaxOffice. You shouldn't need to edit this file.
+# Installation file for MaxOffice. You shouldn't need to edit this file.
 # Author: Max Haase - maxhaase@gmail.com
 # This program creates a startup office Kubernetes cluster with 1 or more domains 
 # with mail server, webmail, Admin GUI, WordPress, storage server and collaboration server.
 # Make sure your user has password-less sudo rights, make this script executable chmod +x 
 # The script install.sh will deploy the complete K8s cluster automagically!
 ###############################################################################
+#!/bin/bash
 
 log() {
     local level="$1"
@@ -16,7 +14,7 @@ log() {
 }
 
 # Redirect all output to a log file
-exec > >(tee -i install.log)
+exec > >(tee -i logs.log)
 exec 2>&1
 
 # Load environment variables from vars.env
@@ -44,7 +42,7 @@ install_dependencies() {
     sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw
 }
 
-# Function to install Docker from Ubuntu repositories
+# Function to install Docker
 install_docker() {
     if ! command -v docker &> /dev/null; then
         log "INFO" "Installing Docker..."
@@ -53,8 +51,16 @@ install_docker() {
         sudo systemctl start docker
         sudo systemctl enable docker
         sudo usermod -aG docker $USER
+        # Apply the new group membership without logout/login
+        newgrp docker <<EONG
+        log "INFO" "Docker group added and applied for the current session."
+EONG
     else
         log "INFO" "Docker is already installed"
+        sudo usermod -aG docker $USER
+        newgrp docker <<EONG
+        log "INFO" "Ensured current user is in Docker group."
+EONG
     fi
 }
 
@@ -126,18 +132,18 @@ install_go() {
     fi
 }
 
-# Function to start Minikube without root privileges
+# Function to start Minikube
 start_minikube() {
     log "INFO" "Starting Minikube..."
-    sudo -u $USER minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY
+    minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY
     if [ $? -ne 0 ]; then
         log "ERROR" "Failed to start Minikube. Checking logs..."
         minikube logs
         log "INFO" "Attempting to restart Minikube..."
-        sudo -u $USER minikube stop
-        sudo -u $USER minikube delete
-        sudo -u $USER minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY
-        if [ $? -ne 0 ]; then
+        minikube stop
+        minikube delete
+        minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY
+        if [ $? -ne 0 ];then
             log "ERROR" "Failed to restart Minikube. Exiting."
             exit 1
         fi
@@ -198,6 +204,18 @@ spec:
     requests:
       storage: 10Gi
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mariadb-secret
+  namespace: $KUBE_NAMESPACE
+type: Opaque
+data:
+  mysql-root-password: $(echo -n $MYSQL_ROOT_PASSWORD | base64)
+  mysql-database: $(echo -n $MYSQL_DATABASE | base64)
+  mysql-user: $(echo -n $MYSQL_USER | base64)
+  mysql-password: $(echo -n $MYSQL_PASSWORD | base64)
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -215,6 +233,8 @@ spec:
       containers:
       - name: mariadb
         image: mariadb:latest
+        ports:
+        - containerPort: 3306
         env:
         - name: MYSQL_ROOT_PASSWORD
           valueFrom:
@@ -236,14 +256,11 @@ spec:
             secretKeyRef:
               name: mariadb-secret
               key: mysql-password
-        ports:
-        - containerPort: 3306
-          name: mysql
         volumeMounts:
-        - mountPath: /var/lib/mysql
-          name: mariadb-persistent-storage
+        - name: mariadb-storage
+          mountPath: /var/lib/mysql
       volumes:
-      - name: mariadb-persistent-storage
+      - name: mariadb-storage
         persistentVolumeClaim:
           claimName: mariadb-pvc
 ---
@@ -262,6 +279,24 @@ spec:
 EOF
 }
 
+# Function to verify MariaDB deployment
+verify_mariadb() {
+    log "INFO" "Verifying MariaDB deployment..."
+    kubectl wait --namespace $KUBE_NAMESPACE --for=condition=available --timeout=300s deployment/mariadb
+    if [ $? -ne 0 ]; then
+        log "ERROR" "MariaDB deployment did not become ready. Exiting."
+        exit 1
+    fi
+    log "INFO" "MariaDB deployment is ready."
+    log "INFO" "Checking MariaDB connection..."
+    kubectl run mariadb-client --rm -i --tty --namespace $KUBE_NAMESPACE --image=bitnami/mariadb:latest --restart=Never -- bash -c "mysql -hmariadb-service -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'SHOW DATABASES;'"
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Unable to connect to MariaDB database. Exiting."
+        exit 1
+    fi
+    log "INFO" "Successfully connected to MariaDB database."
+}
+
 # Main script execution
 cleanup_environment
 install_dependencies
@@ -274,5 +309,6 @@ install_go
 start_minikube
 setup_namespace
 deploy_mariadb
+verify_mariadb
 
 log "INFO" "Installation and setup complete."

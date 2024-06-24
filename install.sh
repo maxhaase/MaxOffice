@@ -51,16 +51,9 @@ install_docker() {
         sudo systemctl start docker
         sudo systemctl enable docker
         sudo usermod -aG docker $USER
-        # Apply the new group membership without logout/login
-        newgrp docker <<EONG
-        log "INFO" "Docker group added and applied for the current session."
-EONG
     else
         log "INFO" "Docker is already installed"
         sudo usermod -aG docker $USER
-        newgrp docker <<EONG
-        log "INFO" "Ensured current user is in Docker group."
-EONG
     fi
 }
 
@@ -135,19 +128,21 @@ install_go() {
 # Function to start Minikube
 start_minikube() {
     log "INFO" "Starting Minikube..."
-    minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY
-    if [ $? -ne 0 ]; then
-        log "ERROR" "Failed to start Minikube. Checking logs..."
-        minikube logs
-        log "INFO" "Attempting to restart Minikube..."
-        minikube stop
-        minikube delete
+    newgrp docker <<EONG
         minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY
-        if [ $? -ne 0 ];then
-            log "ERROR" "Failed to restart Minikube. Exiting."
-            exit 1
+        if [ $? -ne 0 ]; then
+            log "ERROR" "Failed to start Minikube. Checking logs..."
+            minikube logs
+            log "INFO" "Attempting to restart Minikube..."
+            minikube stop
+            minikube delete
+            minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY
+            if [ $? -ne 0 ];then
+                log "ERROR" "Failed to restart Minikube. Exiting."
+                exit 1
+            fi
         fi
-    fi
+EONG
 }
 
 # Function to setup Kubernetes namespace

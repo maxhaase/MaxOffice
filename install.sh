@@ -1,16 +1,10 @@
-# Installation file for MaxOffice. You shouldn't need to edit this file.
-# Author: Max Haase - maxhaase@gmail.com
-# This program creates a startup office Kubernetes cluster with 1 or more domains 
-# with mail server, webmail, Admin GUI, WordPress, storage server and collaboration server.
-# Make sure your user has password-less sudo rights, make this script executable chmod +x 
-# The script install.sh will deploy the complete K8s cluster automagically!
-###############################################################################
 #!/bin/bash
 
+# Function to log information
 log() {
     local level="$1"
     shift
-    echo "[$level] $(date '+%Y-%m-%d %H:%M:%S') $*"
+    echo "[$level] $(date +%F" "%T) $*"
 }
 
 # Redirect all output to a log file
@@ -21,18 +15,18 @@ exec 2>&1
 if [ -f vars.env ]; then
     source vars.env
 else
-    echo "vars.env file not found!"
+    log "ERROR" "vars.env file not found!"
     exit 1
 fi
 
 # Function to clean up environment
 cleanup_environment() {
     log "INFO" "Cleaning up environment..."
-    kubectl delete namespace $KUBE_NAMESPACE --ignore-not-found=true
-    kubectl delete pods --all --namespace=$KUBE_NAMESPACE --ignore-not-found=true
-    kubectl delete services --all --namespace=$KUBE_NAMESPACE --ignore-not-found=true
-    kubectl delete deployments --all --namespace=$KUBE_NAMESPACE --ignore-not-found=true
-    kubectl delete pvc --all --namespace=$KUBE_NAMESPACE --ignore-not-found=true
+    sudo kubectl delete namespace $KUBE_NAMESPACE --ignore-not-found=true
+    sudo kubectl delete pods --all --namespace=$KUBE_NAMESPACE --ignore-not-found=true
+    sudo kubectl delete services --all --namespace=$KUBE_NAMESPACE --ignore-not-found=true
+    sudo kubectl delete deployments --all --namespace=$KUBE_NAMESPACE --ignore-not-found=true
+    sudo kubectl delete pvc --all --namespace=$KUBE_NAMESPACE --ignore-not-found=true
 }
 
 # Function to install dependencies
@@ -51,9 +45,14 @@ install_docker() {
         sudo systemctl start docker
         sudo systemctl enable docker
         sudo usermod -aG docker $USER
+        # Refresh group membership
+        newgrp docker <<EOF
+EOF
     else
         log "INFO" "Docker is already installed"
         sudo usermod -aG docker $USER
+        newgrp docker <<EOF
+EOF
     fi
 }
 
@@ -86,8 +85,8 @@ install_crictl() {
     if ! command -v crictl &> /dev/null; then
         log "INFO" "Installing crictl..."
         curl -LO $CRICTL_URL
-        sudo tar zxvf crictl-v1.24.0-linux-amd64.tar.gz -C /usr/local/bin
-        rm -f crictl-v1.24.0-linux-amd64.tar.gz
+        sudo tar zxvf $(basename $CRICTL_URL) -C /usr/local/bin
+        rm -f $(basename $CRICTL_URL)
     else
         log "INFO" "crictl is already installed"
     fi
@@ -97,11 +96,13 @@ install_crictl() {
 install_cri_dockerd() {
     if ! command -v cri-dockerd &> /dev/null; then
         log "INFO" "Installing cri-dockerd..."
-        sudo apt-get install -y git
+        sudo apt-get install -y git make
+        sudo apt-get install -y gcc g++ golang-1.20-go
+        sudo ln -sf /usr/lib/go-1.20/bin/go /usr/bin/go
         git clone $CRI_DOCKERD_REPO
         cd cri-dockerd
         mkdir bin
-        /usr/local/go/bin/go build -o bin/cri-dockerd
+        go build -o bin/cri-dockerd
         sudo install -o root -g root -m 0755 bin/cri-dockerd /usr/local/bin/
         cd ..
         rm -rf cri-dockerd
@@ -114,12 +115,9 @@ install_cri_dockerd() {
 install_go() {
     if ! command -v go &> /dev/null; then
         log "INFO" "Installing Go..."
-        curl -LO $GO_URL
-        sudo rm -rf /usr/local/go
-        sudo tar -C /usr/local -xzf go$GO_VERSION.linux-amd64.tar.gz
-        rm go$GO_VERSION.linux-amd64.tar.gz
-        export PATH=$PATH:/usr/local/go/bin
-        echo "export PATH=\$PATH:/usr/local/go/bin" >> ~/.profile
+        sudo apt-get update
+        sudo apt-get install -y golang-1.20-go
+        sudo ln -sf /usr/lib/go-1.20/bin/go /usr/bin/go
     else
         log "INFO" "Go is already installed"
     fi
@@ -128,29 +126,27 @@ install_go() {
 # Function to start Minikube
 start_minikube() {
     log "INFO" "Starting Minikube..."
-    newgrp docker <<EONG
-        minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY
-        if [ $? -ne 0 ]; then
-            log "ERROR" "Failed to start Minikube. Checking logs..."
-            minikube logs
-            log "INFO" "Attempting to restart Minikube..."
-            minikube stop
-            minikube delete
-            minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY
-            if [ $? -ne 0 ];then
-                log "ERROR" "Failed to restart Minikube. Exiting."
-                exit 1
-            fi
+    sudo minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY --force
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to start Minikube. Checking logs..."
+        sudo minikube logs
+        log "INFO" "Attempting to restart Minikube..."
+        sudo minikube stop
+        sudo minikube delete
+        sudo minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY --force
+        if [ $? -ne 0 ];then
+            log "ERROR" "Failed to restart Minikube. Exiting."
+            exit 1
         fi
-EONG
+    fi
 }
 
 # Function to setup Kubernetes namespace
 setup_namespace() {
     log "INFO" "Setting up Kubernetes namespace..."
-    kubectl get namespace $KUBE_NAMESPACE || kubectl create namespace $KUBE_NAMESPACE
+    sudo kubectl get namespace $KUBE_NAMESPACE || sudo kubectl create namespace $KUBE_NAMESPACE
     log "INFO" "Creating service account and role binding..."
-    kubectl apply -f - <<EOF
+    sudo kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -186,7 +182,7 @@ EOF
 # Function to deploy MariaDB
 deploy_mariadb() {
     log "INFO" "Deploying MariaDB..."
-    kubectl apply -f - <<EOF
+    sudo kubectl apply -f - <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -277,14 +273,14 @@ EOF
 # Function to verify MariaDB deployment
 verify_mariadb() {
     log "INFO" "Verifying MariaDB deployment..."
-    kubectl wait --namespace $KUBE_NAMESPACE --for=condition=available --timeout=300s deployment/mariadb
+    sudo kubectl wait --namespace $KUBE_NAMESPACE --for=condition=available deployment/mariadb --timeout=120s
     if [ $? -ne 0 ]; then
         log "ERROR" "MariaDB deployment did not become ready. Exiting."
         exit 1
     fi
     log "INFO" "MariaDB deployment is ready."
     log "INFO" "Checking MariaDB connection..."
-    kubectl run mariadb-client --rm -i --tty --namespace $KUBE_NAMESPACE --image=bitnami/mariadb:latest --restart=Never -- bash -c "mysql -hmariadb-service -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'SHOW DATABASES;'"
+    sudo kubectl run mariadb-client --rm -i --tty --namespace $KUBE_NAMESPACE --image=bitnami/mariadb:latest --restart=Never -- bash -c "mysql -hmariadb-service -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'SHOW DATABASES;'"
     if [ $? -ne 0 ]; then
         log "ERROR" "Unable to connect to MariaDB database. Exiting."
         exit 1
@@ -307,3 +303,4 @@ deploy_mariadb
 verify_mariadb
 
 log "INFO" "Installation and setup complete."
+

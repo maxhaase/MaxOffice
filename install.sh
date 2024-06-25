@@ -1,3 +1,10 @@
+# Installation file for MaxOffice. You shouldn't need to edit this file.
+# Author: Max Haase - maxhaase@gmail.com
+# This program creates a startup office Kubernetes cluster with 1 or more domains 
+# with mail server, webmail, Admin GUI, WordPress, storage server and collaboration server.
+# Make sure your user has password-less sudo rights, make this script executable chmod +x 
+# The script install.sh will deploy the complete Kubernetes cluster automagically!
+##########################################################################################
 #!/bin/bash
 
 # Function to log information
@@ -19,6 +26,10 @@ else
     exit 1
 fi
 
+# Adjust fs.protected_regular setting to avoid lock permission issues
+log "INFO" "Adjusting fs.protected_regular setting..."
+sudo sysctl fs.protected_regular=0
+
 # Function to clean up environment
 cleanup_environment() {
     log "INFO" "Cleaning up environment..."
@@ -33,7 +44,7 @@ cleanup_environment() {
 install_dependencies() {
     log "INFO" "Installing dependencies..."
     sudo apt-get update
-    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw
+    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common ufw pv
 }
 
 # Function to install Docker
@@ -126,14 +137,15 @@ install_go() {
 # Function to start Minikube
 start_minikube() {
     log "INFO" "Starting Minikube..."
-    sudo minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY --force
+    # Suppress Minikube logs by redirecting to /dev/null
+    sudo minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY --force > minikube_start.log 2>&1
     if [ $? -ne 0 ]; then
         log "ERROR" "Failed to start Minikube. Checking logs..."
         sudo minikube logs
         log "INFO" "Attempting to restart Minikube..."
         sudo minikube stop
         sudo minikube delete
-        sudo minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY --force
+        sudo minikube start --driver=docker --cpus=$MINIKUBE_CPUS --memory=$MINIKUBE_MEMORY --force > minikube_start.log 2>&1
         if [ $? -ne 0 ];then
             log "ERROR" "Failed to restart Minikube. Exiting."
             exit 1
@@ -263,8 +275,6 @@ metadata:
 spec:
   ports:
   - port: 3306
-    targetPort: 3306
-    name: mysql
   selector:
     app: mariadb
 EOF
@@ -273,19 +283,31 @@ EOF
 # Function to verify MariaDB deployment
 verify_mariadb() {
     log "INFO" "Verifying MariaDB deployment..."
-    sudo kubectl wait --namespace $KUBE_NAMESPACE --for=condition=available deployment/mariadb --timeout=120s
+    sudo kubectl wait --namespace $KUBE_NAMESPACE --for=condition=available --timeout=600s deployment/mariadb
     if [ $? -ne 0 ]; then
         log "ERROR" "MariaDB deployment did not become ready. Exiting."
         exit 1
     fi
     log "INFO" "MariaDB deployment is ready."
     log "INFO" "Checking MariaDB connection..."
-    sudo kubectl run mariadb-client --rm -i --tty --namespace $KUBE_NAMESPACE --image=bitnami/mariadb:latest --restart=Never -- bash -c "mysql -hmariadb-service -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'SHOW DATABASES;'"
-    if [ $? -ne 0 ]; then
-        log "ERROR" "Unable to connect to MariaDB database. Exiting."
-        exit 1
-    fi
-    log "INFO" "Successfully connected to MariaDB database."
+    
+    # Retry mechanism for MariaDB connection
+    local retries=5
+    local wait=10
+    local count=0
+    while [ $count -lt $retries ]; do
+        sudo kubectl run mariadb-client --rm -i --tty --namespace $KUBE_NAMESPACE --image=bitnami/mariadb:latest --restart=Never -- bash -c "/opt/bitnami/mariadb/bin/mariadb -hmariadb-service -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'SHOW DATABASES;'"
+        if [ $? -eq 0 ]; then
+            log "INFO" "Successfully connected to MariaDB database."
+            return
+        else
+            log "WARN" "Unable to connect to MariaDB database. Retrying in $wait seconds..."
+            sleep $wait
+            count=$((count+1))
+        fi
+    done
+    log "ERROR" "Unable to connect to MariaDB database after $retries attempts. Exiting."
+    exit 1
 }
 
 # Main script execution
@@ -303,4 +325,3 @@ deploy_mariadb
 verify_mariadb
 
 log "INFO" "Installation and setup complete."
-
